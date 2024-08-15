@@ -16,13 +16,9 @@ def dequantize_tensor(tensor, dtype=torch.float16):
     elif qtype == gguf.GGMLQuantizationType.F16:
         return data.to(dtype)
     elif qtype in dequantize_functions:
-        # this is the main pytorch op
-        if False and dtype == torch.bfloat16: # disabled, lower quality
-            # dequant directly in native BF16
-            return dequantize(data, qtype, oshape, dtype) 
-        else:
-            # dequant in fp32, convert to target
-            return dequantize(data, qtype, oshape, dtype=torch.float32).to(dtype)
+        # dequantize in fp16 then convert instead of keeping FP32
+        out = dequantize(data, qtype, oshape, dtype=None)
+        return out.to(dtype) if out.dtype != dtype else out # why is .to() not a no-op?
     else:
         # this is incredibly slow
         new = gguf.quants.dequantize(data.cpu().numpy(), qtype)
