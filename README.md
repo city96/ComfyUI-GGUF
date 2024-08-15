@@ -9,13 +9,16 @@ While quantization wasn't feasible for regular UNET models (conv2d), transformer
 
 ## Installation
 
+> [!IMPORTANT]  
+> Make sure your ComfyUI is on a recent-enough version to support custom ops when loading the UNET-only.
+
 To install the custom node, clone it to your custom_nodes ComfyUI folder using the following command:
 
 ```
-git clone https://github.com/city96/ComfyUI-GGUF custom_nodes/ComfyUI-GGUF
+git clone https://github.com/city96/ComfyUI-GGUF ComfyUI/custom_nodes/ComfyUI-GGUF
 ```
 
-To install the required `gguf` python package on the standalone ComfyUI, use the following:
+To install the required `gguf` python package on the standalone ComfyUI, Open a CMD where your `run_nvidia_gpu.bat` file is and use the following command:
 ```
 .\python_embeded\python.exe -s -m pip install -r .\ComfyUI\custom_nodes\ComfyUI-GGUF\requirements.txt
 ```
