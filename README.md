@@ -12,17 +12,25 @@ While quantization wasn't feasible for regular UNET models (conv2d), transformer
 > [!IMPORTANT]  
 > Make sure your ComfyUI is on a recent-enough version to support custom ops when loading the UNET-only.
 
-To install the custom node, clone it to your custom_nodes ComfyUI folder using the following command:
+To install the custom node normally, git clone this repository and install the only dependency for inference (`pip install --upgrade gguf`)
+
+```
+git clone https://github.com/city96/ComfyUI-GGUF
+```
+
+To install the custom node on standalone, open a CMD inside the "ComfyUI_windows_portable" folder (where your `run_nvidia_gpu.bat` file is) and use the following commands:
 
 ```
 git clone https://github.com/city96/ComfyUI-GGUF ComfyUI/custom_nodes/ComfyUI-GGUF
-```
-
-To install the required `gguf` python package on the standalone ComfyUI, Open a CMD where your `run_nvidia_gpu.bat` file is and use the following command:
-```
 .\python_embeded\python.exe -s -m pip install -r .\ComfyUI\custom_nodes\ComfyUI-GGUF\requirements.txt
 ```
 
 ## Usage
 
-Simply use the GGUF Unet loader found under the `bootleg` category. You can find [pre-quantized models for flux1-dev here](https://huggingface.co/city96/FLUX.1-dev-gguf) - place these in your `ComfyUI/models/unet` folder.
+Simply use the GGUF Unet loader found under the `bootleg` category. Place the .gguf model files in your `ComfyUI/models/unet` folder.
+
+Pre-quantized models:
+
+- [flux1-dev GGUF](https://huggingface.co/city96/FLUX.1-dev-gguf)
+- [flux1-schnell GGUF](https://huggingface.co/city96/FLUX.1-schnell-gguf)
+
