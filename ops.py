@@ -72,7 +72,8 @@ class GGMLOps(comfy.ops.disable_weight_init):
             self.parameters_manual_cast = torch.float32
 
         def forward(self, x):
-            weight, bias = self.get_weights(x.dtype)
-            x = torch.nn.functional.linear(x, weight, bias)
-            del weight, bias
+            with torch.no_grad():
+                weight, bias = self.get_weights(x.dtype)
+                x = torch.nn.functional.linear(x, weight, bias)
+                del weight, bias
             return x
