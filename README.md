@@ -34,3 +34,5 @@ Pre-quantized models:
 - [flux1-dev GGUF](https://huggingface.co/city96/FLUX.1-dev-gguf)
 - [flux1-schnell GGUF](https://huggingface.co/city96/FLUX.1-schnell-gguf)
 
+> [!WARNING]  
+> LoRA / Controlnet / etc are currently not supported due to the weights being quantized.
