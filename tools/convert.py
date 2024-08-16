@@ -103,6 +103,9 @@ def handle_tensors(args, writer, state_dict):
             "final_layer.",
         ]
 
+        if any([x in key for x in blacklist]) and ".weight" in key:
+            data_qtype = fallback
+
         if n_dims == 1: 
             # one-dimensional tensors should be kept in F32
             # also speeds up inference due to not dequantizing
@@ -120,9 +123,6 @@ def handle_tensors(args, writer, state_dict):
             elif data_shape[-1] == 1: # 1x1 kernel
                 #data = np.squeeze(data) # don't do this
                 data_qtype = fallback
-
-        elif any([x in key for x in blacklist]) and ".weight" in key:
-            data_qtype = fallback
 
         # TODO: find keys to keep in higher precision(s) / qtypes
         # if "time_emb_proj.weight" in key:
