@@ -53,18 +53,18 @@ class GGMLLayer(torch.nn.Module):
         # This is a fake state dict for vram estimation
         if self.weight is not None:
             weight = torch.zeros_like(self.weight, device=torch.device("meta"))
-            destination[f"{prefix}.weight"] = weight
+            destination[f"{prefix}weight"] = weight
         if self.bias is not None:
             bias = torch.zeros_like(self.bias, device=torch.device("meta"))
-            destination[f"{prefix}.bias"] = bias
+            destination[f"{prefix}bias"] = bias
         return
 
         # This would return the actual state dict
         weight, bias = self.get_weights()
         if weight is not None:
-            destination[f"{prefix}.weight"] = weight
+            destination[f"{prefix}weight"] = weight
         if bias is not None:
-            destination[f"{prefix}.bias"] = weight
+            destination[f"{prefix}bias"] = weight
 
     def _apply(self, fn):
         if self.weight is not None:
