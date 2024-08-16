@@ -18,7 +18,7 @@ class GGMLTensor(torch.Tensor):
         )
 
     def __new__(cls, tensor, *args, **kwargs):
-        data = torch.tensor(tensor.data)
+        data = torch.from_numpy(tensor.data)
         return super().__new__(cls, data, *args, **kwargs)
 
     def to(self, *args, **kwargs):
@@ -49,6 +49,23 @@ class GGMLLayer(torch.nn.Module):
             else:
                 missing_keys.append(k)
 
+    def _save_to_state_dict(self, destination, prefix, keep_vars):
+        # This is a fake state dict for vram estimation
+        if self.weight is not None:
+            weight = torch.zeros_like(self.weight, device=torch.device("meta"))
+            destination[f"{prefix}.weight"] = weight
+        if self.bias is not None:
+            bias = torch.zeros_like(self.bias, device=torch.device("meta"))
+            destination[f"{prefix}.bias"] = bias
+        return
+
+        # This would return the actual state dict
+        weight, bias = self.get_weights()
+        if weight is not None:
+            destination[f"{prefix}.weight"] = weight
+        if bias is not None:
+            destination[f"{prefix}.bias"] = weight
+
     def _apply(self, fn):
         if self.weight is not None:
             self.weight = fn(self.weight)
@@ -67,13 +84,22 @@ class GGMLOps(comfy.ops.disable_weight_init):
     Dequantize weights on the fly before doing the compute
     """
     class Linear(GGMLLayer):
+        comfy_cast_weights = True
+
         def __init__(self, *args, device=None, dtype=None, **kwargs):
             super().__init__(device=device, dtype=dtype)
-            self.parameters_manual_cast = torch.float32
 
         def forward(self, x):
-            with torch.no_grad():
-                weight, bias = self.get_weights(x.dtype)
-                x = torch.nn.functional.linear(x, weight, bias)
-                del weight, bias
+            # lowvram hack
+            device = None
+            if self.weight.device != x.device:
+                device = self.weight.device
+                self.to(x.device)
+
+            weight, bias = self.get_weights(x.dtype)
+            x = torch.nn.functional.linear(x, weight, bias)
+            del weight, bias
+
+            if device:
+                self.to(device)
             return x

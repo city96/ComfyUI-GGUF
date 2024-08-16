@@ -22,9 +22,6 @@ def gguf_sd_loader(path):
     for tensor in reader.tensors:
         sd[str(tensor.name)] = GGMLTensor(tensor)
         dt[str(tensor.tensor_type)] = dt.get(str(tensor.tensor_type), 0) + 1
-    
-    # TODO: .to doesn't get passed later on for some reason, this is a hotfix
-    #sd = {k:v.to(comfy.model_management.get_torch_device()) for k,v in sd.items()}
 
     # sanity check debug print
     print("\nggml_sd_loader:")
