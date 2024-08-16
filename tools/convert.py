@@ -136,11 +136,11 @@ def handle_tensors(args, writer, state_dict):
             data = gguf.quants.quantize(data, data_qtype)
         except gguf.QuantError as e:
             tqdm.write(f"falling back to F16: {e}")
-            data_qtype = gguf.GGMLQuantizationType.F32
+            data_qtype = gguf.GGMLQuantizationType.F16
             data = gguf.quants.quantize(data, data_qtype)
         except AttributeError as e:
             tqdm.write(f"falling back to F16: {e}")
-            data_qtype = gguf.GGMLQuantizationType.F32
+            data_qtype = gguf.GGMLQuantizationType.F16
             data = gguf.quants.quantize(data, data_qtype)
 
         new_name = key # do we need to rename?
