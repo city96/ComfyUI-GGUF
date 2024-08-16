@@ -83,7 +83,11 @@ def handle_tensors(args, writer, state_dict):
         n_dims = len(data.shape)
         data_qtype = args.qtype
         data_shape = data.shape
-        fallback = gguf.GGMLQuantizationType.F16
+        fallback = gguf.GGMLQuantizationType.F32
+
+        # NOTE: fallback data type is F32 because many models such as Flux
+        #       are published in BF16, and BF16 --> F16 is not lossless,
+        #       while BF16 --> F32 is lossless.
 
         if n_dims == 1: 
             # these barely take up space, just use F32 / F16.
@@ -123,12 +127,12 @@ def handle_tensors(args, writer, state_dict):
         try:
             data = gguf.quants.quantize(data, data_qtype)
         except gguf.QuantError as e:
-            tqdm.write(f"falling back to F16: {e}")
-            data_qtype = gguf.GGMLQuantizationType.F16
+            tqdm.write(f"falling back to F32: {e}")
+            data_qtype = gguf.GGMLQuantizationType.F32
             data = gguf.quants.quantize(data, data_qtype)
         except AttributeError as e:
-            tqdm.write(f"falling back to F16: {e}")
-            data_qtype = gguf.GGMLQuantizationType.F16
+            tqdm.write(f"falling back to F32: {e}")
+            data_qtype = gguf.GGMLQuantizationType.F32
             data = gguf.quants.quantize(data, data_qtype)
 
         new_name = key # do we need to rename?
