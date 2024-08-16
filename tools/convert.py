@@ -83,26 +83,15 @@ def handle_tensors(args, writer, state_dict):
         n_dims = len(data.shape)
         data_qtype = args.qtype
         data_shape = data.shape
-        fallback = gguf.GGMLQuantizationType.F32
 
-        # NOTE: fallback data type is F32 because many models such as Flux
-        #       are published in BF16, and BF16 --> F16 is not lossless,
-        #       while BF16 --> F32 is lossless.
+        # get number of parameters (AKA elements) in this tensor
+        n_params = 1
+        for dim_size in data_shape:
+            n_params *= dim_size
 
-        if n_dims == 1: 
-            # these barely take up space, just use F32 / F16.
-            # also speeds up inference due to not dequantizing
-            data_qtype = fallback
-        elif n_dims == 4:
-            if min(data.shape[:2]) == 4: # output tensor
-                data_qtype = fallback
-            elif data.shape[-1] == 3: # 3x3 kernel
-                data_qtype = fallback
-            elif data.shape[-1] == 1: # 1x1 kernel
-                #data = np.squeeze(data) # don't do this
-                data_qtype = fallback
+        fallback = gguf.GGMLQuantizationType.F16
 
-        # other keys to keep as max precision
+        # keys to keep as max precision
         blacklist = [
             "time_embedding.",
             "add_embedding.",
@@ -113,7 +102,26 @@ def handle_tensors(args, writer, state_dict):
             "guidance_in.",
             "final_layer.",
         ]
-        if any([x in key for x in blacklist]) and ".weight" in key:
+
+        if n_dims == 1: 
+            # one-dimensional tensors should be kept in F32
+            # also speeds up inference due to not dequantizing
+            data_qtype = gguf.GGMLQuantizationType.F32
+        
+        elif n_params <= 1024:
+            # very small tensors
+            data_qtype = gguf.GGMLQuantizationType.F32
+        
+        elif n_dims == 4:
+            if min(data.shape[:2]) == 4: # output tensor
+                data_qtype = fallback
+            elif data_shape[-1] == 3: # 3x3 kernel
+                data_qtype = fallback
+            elif data_shape[-1] == 1: # 1x1 kernel
+                #data = np.squeeze(data) # don't do this
+                data_qtype = fallback
+
+        elif any([x in key for x in blacklist]) and ".weight" in key:
             data_qtype = fallback
 
         # TODO: find keys to keep in higher precision(s) / qtypes
@@ -127,11 +135,11 @@ def handle_tensors(args, writer, state_dict):
         try:
             data = gguf.quants.quantize(data, data_qtype)
         except gguf.QuantError as e:
-            tqdm.write(f"falling back to F32: {e}")
+            tqdm.write(f"falling back to F16: {e}")
             data_qtype = gguf.GGMLQuantizationType.F32
             data = gguf.quants.quantize(data, data_qtype)
         except AttributeError as e:
-            tqdm.write(f"falling back to F32: {e}")
+            tqdm.write(f"falling back to F16: {e}")
             data_qtype = gguf.GGMLQuantizationType.F32
             data = gguf.quants.quantize(data, data_qtype)
 
