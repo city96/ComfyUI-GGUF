@@ -10,6 +10,7 @@ import comfy.model_management
 import folder_paths
 
 from .ops import GGMLTensor, GGMLOps
+from .lora import load_lora_gguf
 
 # TODO: This causes gguf files to show up in the main unet loader
 folder_paths.folder_names_and_paths["unet"][1].add(".gguf")
@@ -64,6 +65,47 @@ class UnetLoaderGGUF:
             raise RuntimeError("ERROR: Could not detect model type of: {}".format(unet_path))
         return (model,)
 
+class LoraLoaderGGUFModelOnly:
+    def __init__(self):
+        self.loaded_lora = None
+
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                 "model": ("MODEL",),
+                 "lora_name": (folder_paths.get_filename_list("loras"), ),
+                 "strength_model": ("FLOAT", {"default": 1.0, "min": -100.0, "max": 100.0, "step": 0.01}),
+            }
+        }
+
+    RETURN_TYPES = ("MODEL",)
+    FUNCTION = "load_lora"
+    CATEGORY = "bootleg"
+    TITLE = "LoRA Loader Model Only (GGUF)"
+
+    def load_lora(self, model, lora_name, strength_model):
+        if strength_model == 0:
+            return (model,)
+
+        lora_path = folder_paths.get_full_path("loras", lora_name)
+        lora = None
+        if self.loaded_lora is not None:
+            if self.loaded_lora[0] == lora_path:
+                lora = self.loaded_lora[1]
+            else:
+                temp = self.loaded_lora
+                self.loaded_lora = None
+                del temp
+
+        if lora is None:
+            lora = comfy.utils.load_torch_file(lora_path, safe_load=True)
+            self.loaded_lora = (lora_path, lora)
+
+        model_lora = load_lora_gguf(model, lora, strength_model)
+        return (model_lora,)
+
 NODE_CLASS_MAPPINGS = {
     "UnetLoaderGGUF": UnetLoaderGGUF,
+    "LoraLoaderGGUFModelOnly": LoraLoaderGGUFModelOnly,
 }

@@ -14,6 +14,7 @@ class GGMLTensor(torch.Tensor):
         super().__init__()
         self.tensor_type = tensor_type
         self.tensor_shape = tensor_shape
+        self.patches = patches
 
     def __new__(cls, *args, tensor_type, tensor_shape, patches=[], **kwargs):
         return super().__new__(cls, *args, **kwargs)
@@ -22,7 +23,14 @@ class GGMLTensor(torch.Tensor):
         new = super().to(*args, **kwargs)
         new.tensor_type = self.tensor_type
         new.tensor_shape = self.tensor_shape
+        new.patches = self.patches.copy()
         return new
+
+    def clone(self, *args, **kwargs):
+        return self
+
+    def detach(self, *args, **kwargs):
+        return self
 
     @property
     def shape(self):
@@ -65,7 +73,11 @@ class GGMLLayer(torch.nn.Module):
 
     def _apply(self, fn):
         if self.weight is not None:
-            self.weight = fn(self.weight)
+            try:
+                self.weight = fn(self.weight)
+            except TypeError:
+                # TODO: Figure out why this happens
+                pass
         if self.bias is not None:
             self.bias = fn(self.bias)
         super()._apply(fn)
@@ -75,6 +87,8 @@ class GGMLLayer(torch.nn.Module):
         if tensor is None:
             return
         weight = dequantize_tensor(tensor, dtype)
+        for function, patches, key in getattr(tensor, "patches", []):
+            weight = function(patches, weight, key)
         return weight
 
     def get_weights(self, dtype=torch.float16):
