@@ -1,6 +1,7 @@
 # (c) City96 || Apache-2.0 (apache.org/licenses/LICENSE-2.0)
 import torch
 import gguf
+import types
 import logging
 import numpy as np
 
@@ -10,7 +11,6 @@ import comfy.model_management
 import folder_paths
 
 from .ops import GGMLTensor, GGMLOps
-from .lora import load_lora_gguf
 
 # TODO: This causes gguf files to show up in the main unet loader
 folder_paths.folder_names_and_paths["unet"][1].add(".gguf")
@@ -63,70 +63,38 @@ class UnetLoaderGGUF:
         if model is None:
             logging.error("ERROR UNSUPPORTED UNET {}".format(unet_path))
             raise RuntimeError("ERROR: Could not detect model type of: {}".format(unet_path))
+        self.patch_calculate_weight(model)
         return (model,)
 
-class LoraLoaderGGUFModelOnly:
-    def __init__(self):
-        self.loaded_lora = None
-
-    @classmethod
-    def INPUT_TYPES(s):
-        return {
-            "required": {
-                 "model": ("MODEL",),
-                 "lora_name": (folder_paths.get_filename_list("loras"), ),
-                 "strength_model": ("FLOAT", {"default": 1.0, "min": -100.0, "max": 100.0, "step": 0.01}),
-                 "lora_on_gpu": ("BOOLEAN", {"default": True}),
-            }
-        }
-
-    RETURN_TYPES = ("MODEL",)
-    FUNCTION = "load_lora"
-    CATEGORY = "bootleg"
-    TITLE = "LoRA Loader Model Only (GGUF)"
-
-    def load_lora(self, model, lora_name, strength_model, lora_on_gpu):
-        if strength_model == 0:
-            return (model,)
-
-        lora_path = folder_paths.get_full_path("loras", lora_name)
-        lora = None
-        if self.loaded_lora is not None:
-            if self.loaded_lora[0] == lora_path:
-                lora = self.loaded_lora[1]
+    def patch_calculate_weight(self, model):
+        def calculate_weight(self, patches, weight, key):
+            if isinstance(weight, GGMLTensor):
+                qtype = weight.tensor_type
+                # TODO: don't even store these in a custom format
+                if qtype in [gguf.GGMLQuantizationType.F32, gguf.GGMLQuantizationType.F16]:
+                    return self.calculate_weight_orig(patches, weight, key)
+                else:
+                    weight.patches.append((self.calculate_weight_orig, patches, key))
+                    return weight
             else:
-                temp = self.loaded_lora
-                self.loaded_lora = None
-                del temp
+                return self.calculate_weight_orig(patches, weight, key)
 
-        if lora is None:
-            lora = comfy.utils.load_torch_file(lora_path, safe_load=True)
-            self.loaded_lora = (lora_path, lora)
+        # make sure custom patch logic is used as to not mangle quants
+        model.calculate_weight_orig = model.calculate_weight
+        model.calculate_weight = types.MethodType(calculate_weight, model)
 
-        # This is a super hacky method to get it to load alongside the model
-        param_dict_name = f"lora_state_dict"#_{lora_name}".replace('.', '_')
-        target_model = model.model.diffusion_model
-        if lora_on_gpu:
-            print(f"WARNING! Loading the LoRA to GPU memory may cause OOM issues or memory leaks!")
-            temp = {}
-            params = torch.nn.ParameterDict()
-            for k,v in lora.items():
-                param = torch.nn.Parameter(v, requires_grad=False)
-                temp[k] = param
-                params[k.replace('.', '_')] = param
-            params.to(model.load_device, dtype=torch.float16)
-            target_model.register_module(param_dict_name, params)
-            lora = temp
-        else:
-            params = getattr(target_model, param_dict_name, None)
-            if params:
-                params.to("cpu", dtype=torch.float16)
-                delattr(target_model, param_dict_name)
+        # make sure this logic is preserved for cloned patchers
+        def clone(self, *args, **kwargs):
+            new = self.clone_orig(*args, **kwargs)
+            new.calculate_weight_orig = new.calculate_weight
+            new.calculate_weight = types.MethodType(calculate_weight, model)
+            return new
 
-        model_lora = load_lora_gguf(model, lora, strength_model)
-        return (model_lora,)
+        model.clone_orig = model.clone
+        model.clone = types.MethodType(clone, model)
+
+        return model
 
 NODE_CLASS_MAPPINGS = {
     "UnetLoaderGGUF": UnetLoaderGGUF,
-    "LoraLoaderGGUFModelOnly": LoraLoaderGGUFModelOnly,
 }
