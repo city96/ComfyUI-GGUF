@@ -31,10 +31,9 @@ git clone https://github.com/city96/ComfyUI-GGUF ComfyUI/custom_nodes/ComfyUI-GG
 
 Simply use the GGUF Unet loader found under the `bootleg` category. Place the .gguf model files in your `ComfyUI/models/unet` folder.
 
+LoRA loading is experimental but it should work with just the built-in LoRA loader node(s).
+
 Pre-quantized models:
 
 - [flux1-dev GGUF](https://huggingface.co/city96/FLUX.1-dev-gguf)
 - [flux1-schnell GGUF](https://huggingface.co/city96/FLUX.1-schnell-gguf)
-
-> [!WARNING]  
-> LoRA / Controlnet / etc are currently not supported due to the weights being quantized.
