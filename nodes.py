@@ -1,13 +1,14 @@
 # (c) City96 || Apache-2.0 (apache.org/licenses/LICENSE-2.0)
 import torch
 import gguf
-import types
+import copy
 import logging
 import numpy as np
 
 import comfy.sd
 import comfy.utils
 import comfy.model_management
+import comfy.model_patcher
 import folder_paths
 
 from .ops import GGMLTensor, GGMLOps
@@ -63,37 +64,35 @@ class UnetLoaderGGUF:
         if model is None:
             logging.error("ERROR UNSUPPORTED UNET {}".format(unet_path))
             raise RuntimeError("ERROR: Could not detect model type of: {}".format(unet_path))
-        self.patch_calculate_weight(model)
+        model = GGUFModelPatcher.clone(model)
         return (model,)
 
-    def patch_calculate_weight(self, model):
-        def calculate_weight(self, patches, weight, key):
-            if isinstance(weight, GGMLTensor):
-                qtype = weight.tensor_type
-                # TODO: don't even store these in a custom format
-                if qtype in [gguf.GGMLQuantizationType.F32, gguf.GGMLQuantizationType.F16]:
-                    return self.calculate_weight_orig(patches, weight, key)
-                else:
-                    weight.patches.append((self.calculate_weight_orig, patches, key))
-                    return weight
+# TODO: Temporary fix for now
+class GGUFModelPatcher(comfy.model_patcher.ModelPatcher):
+    def calculate_weight(self, patches, weight, key):
+        if isinstance(weight, GGMLTensor):
+            qtype = weight.tensor_type
+            # TODO: don't even store these in a custom format
+            if qtype in [gguf.GGMLQuantizationType.F32, gguf.GGMLQuantizationType.F16]:
+                return super().calculate_weight(patches, weight, key)
             else:
-                return self.calculate_weight_orig(patches, weight, key)
+                weight.patches.append((super().calculate_weight, patches, key))
+                return weight
+        else:
+            return super().calculate_weight(patches, weight, key)
 
-        # make sure custom patch logic is used as to not mangle quants
-        model.calculate_weight_orig = model.calculate_weight
-        model.calculate_weight = types.MethodType(calculate_weight, model)
+    def clone(self, *args, **kwargs):
+        n = GGUFModelPatcher(self.model, self.load_device, self.offload_device, self.size, weight_inplace_update=self.weight_inplace_update)
+        n.patches = {}
+        for k in self.patches:
+            n.patches[k] = self.patches[k][:]
+        n.patches_uuid = self.patches_uuid
 
-        # make sure this logic is preserved for cloned patchers
-        def clone(self, *args, **kwargs):
-            new = self.clone_orig(*args, **kwargs)
-            new.calculate_weight_orig = new.calculate_weight
-            new.calculate_weight = types.MethodType(calculate_weight, model)
-            return new
-
-        model.clone_orig = model.clone
-        model.clone = types.MethodType(clone, model)
-
-        return model
+        n.object_patches = self.object_patches.copy()
+        n.model_options = copy.deepcopy(self.model_options)
+        n.backup = self.backup
+        n.object_patches_backup = self.object_patches_backup
+        return n
 
 NODE_CLASS_MAPPINGS = {
     "UnetLoaderGGUF": UnetLoaderGGUF,
