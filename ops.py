@@ -83,12 +83,33 @@ class GGMLLayer(torch.nn.Module):
         super()._apply(fn)
         return self
 
+    def move_patch_to_cuda(self, item, device):
+        if isinstance(item, torch.Tensor):
+            return item.to(device, non_blocking=True)
+        elif isinstance(item, tuple):
+            return tuple(self.move_patch_to_cuda(x, device) for x in item)
+        elif isinstance(item, list):
+            return [self.move_patch_to_cuda(x, device) for x in item]
+        else:
+            return item
+
     def get_weight(self, tensor, dtype):
         if tensor is None:
             return
+
+        # consolidate and load patches to GPU in async
+        patch_list = []
+        device = tensor.device
+        t_move = lambda x: x.to(device) if torch.is_tensor(x) else x
+        for function, patches, _ in getattr(tensor, "patches", []):
+            patch_list += self.move_patch_to_cuda(patches, device)
+
+        # dequantize tensor while patches load
         weight = dequantize_tensor(tensor, dtype)
-        for function, patches, key in getattr(tensor, "patches", []):
-            weight = function(patches, weight, key)
+
+        # apply patches
+        if patch_list:
+            weight = function(patch_list, weight, "dequant.name.unknown")
         return weight
 
     def get_weights(self, dtype=torch.float16):
