@@ -10,16 +10,13 @@ class GGMLTensor(torch.Tensor):
     """
     Main tensor-like class for storing quantized weights
     """
-    def __init__(self, tensor, *args, **kwargs):
+    def __init__(self, *args, tensor_type, tensor_shape, patches=[], **kwargs):
         super().__init__()
-        self.tensor_type = tensor.tensor_type
-        self.tensor_shape = torch.Size(
-            np.flip(list(tensor.shape))
-        )
+        self.tensor_type = tensor_type
+        self.tensor_shape = tensor_shape
 
-    def __new__(cls, tensor, *args, **kwargs):
-        data = torch.from_numpy(tensor.data)
-        return super().__new__(cls, data, *args, **kwargs)
+    def __new__(cls, *args, tensor_type, tensor_shape, patches=[], **kwargs):
+        return super().__new__(cls, *args, **kwargs)
 
     def to(self, *args, **kwargs):
         new = super().to(*args, **kwargs)
@@ -74,9 +71,15 @@ class GGMLLayer(torch.nn.Module):
         super()._apply(fn)
         return self
 
+    def get_weight(self, tensor, dtype):
+        if tensor is None:
+            return
+        weight = dequantize_tensor(tensor, dtype)
+        return weight
+
     def get_weights(self, dtype=torch.float16):
-        weight = dequantize_tensor(self.weight, dtype)
-        bias = dequantize_tensor(self.bias, dtype)
+        weight = self.get_weight(self.weight, dtype)
+        bias = self.get_weight(self.bias, dtype)
         return (weight, bias)
 
 class GGMLOps(comfy.ops.disable_weight_init):

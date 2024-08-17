@@ -1,6 +1,8 @@
 # (c) City96 || Apache-2.0 (apache.org/licenses/LICENSE-2.0)
+import torch
 import gguf
 import logging
+import numpy as np
 
 import comfy.sd
 import comfy.utils
@@ -20,7 +22,13 @@ def gguf_sd_loader(path):
     sd = {}
     dt = {}
     for tensor in reader.tensors:
-        sd[str(tensor.name)] = GGMLTensor(tensor)
+        sd[str(tensor.name)] = GGMLTensor(
+            torch.from_numpy(tensor.data), # mmap
+            tensor_type = tensor.tensor_type,
+            tensor_shape = torch.Size(
+                np.flip(list(tensor.shape))
+            )
+        )
         dt[str(tensor.tensor_type)] = dt.get(str(tensor.tensor_type), 0) + 1
 
     # sanity check debug print
