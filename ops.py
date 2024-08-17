@@ -10,22 +10,27 @@ class GGMLTensor(torch.Tensor):
     """
     Main tensor-like class for storing quantized weights
     """
-    def __init__(self, tensor, *args, **kwargs):
+    def __init__(self, *args, tensor_type, tensor_shape, patches=[], **kwargs):
         super().__init__()
-        self.tensor_type = tensor.tensor_type
-        self.tensor_shape = torch.Size(
-            np.flip(list(tensor.shape))
-        )
+        self.tensor_type = tensor_type
+        self.tensor_shape = tensor_shape
+        self.patches = patches
 
-    def __new__(cls, tensor, *args, **kwargs):
-        data = torch.from_numpy(tensor.data)
-        return super().__new__(cls, data, *args, **kwargs)
+    def __new__(cls, *args, tensor_type, tensor_shape, patches=[], **kwargs):
+        return super().__new__(cls, *args, **kwargs)
 
     def to(self, *args, **kwargs):
         new = super().to(*args, **kwargs)
         new.tensor_type = self.tensor_type
         new.tensor_shape = self.tensor_shape
+        new.patches = self.patches.copy()
         return new
+
+    def clone(self, *args, **kwargs):
+        return self
+
+    def detach(self, *args, **kwargs):
+        return self
 
     @property
     def shape(self):
@@ -68,15 +73,48 @@ class GGMLLayer(torch.nn.Module):
 
     def _apply(self, fn):
         if self.weight is not None:
-            self.weight = fn(self.weight)
+            try:
+                self.weight = fn(self.weight)
+            except TypeError:
+                # TODO: Figure out why this happens
+                pass
         if self.bias is not None:
             self.bias = fn(self.bias)
         super()._apply(fn)
         return self
 
+    def move_patch_to_cuda(self, item, device):
+        if isinstance(item, torch.Tensor):
+            return item.to(device, non_blocking=True)
+        elif isinstance(item, tuple):
+            return tuple(self.move_patch_to_cuda(x, device) for x in item)
+        elif isinstance(item, list):
+            return [self.move_patch_to_cuda(x, device) for x in item]
+        else:
+            return item
+
+    def get_weight(self, tensor, dtype):
+        if tensor is None:
+            return
+
+        # consolidate and load patches to GPU in async
+        patch_list = []
+        device = tensor.device
+        t_move = lambda x: x.to(device) if torch.is_tensor(x) else x
+        for function, patches, _ in getattr(tensor, "patches", []):
+            patch_list += self.move_patch_to_cuda(patches, device)
+
+        # dequantize tensor while patches load
+        weight = dequantize_tensor(tensor, dtype)
+
+        # apply patches
+        if patch_list:
+            weight = function(patch_list, weight, "dequant.name.unknown")
+        return weight
+
     def get_weights(self, dtype=torch.float16):
-        weight = dequantize_tensor(self.weight, dtype)
-        bias = dequantize_tensor(self.bias, dtype)
+        weight = self.get_weight(self.weight, dtype)
+        bias = self.get_weight(self.bias, dtype)
         return (weight, bias)
 
 class GGMLOps(comfy.ops.disable_weight_init):

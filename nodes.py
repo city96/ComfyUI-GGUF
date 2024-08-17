@@ -1,6 +1,9 @@
 # (c) City96 || Apache-2.0 (apache.org/licenses/LICENSE-2.0)
+import torch
 import gguf
+import types
 import logging
+import numpy as np
 
 import comfy.sd
 import comfy.utils
@@ -20,7 +23,13 @@ def gguf_sd_loader(path):
     sd = {}
     dt = {}
     for tensor in reader.tensors:
-        sd[str(tensor.name)] = GGMLTensor(tensor)
+        sd[str(tensor.name)] = GGMLTensor(
+            torch.from_numpy(tensor.data), # mmap
+            tensor_type = tensor.tensor_type,
+            tensor_shape = torch.Size(
+                np.flip(list(tensor.shape))
+            )
+        )
         dt[str(tensor.tensor_type)] = dt.get(str(tensor.tensor_type), 0) + 1
 
     # sanity check debug print
@@ -54,7 +63,37 @@ class UnetLoaderGGUF:
         if model is None:
             logging.error("ERROR UNSUPPORTED UNET {}".format(unet_path))
             raise RuntimeError("ERROR: Could not detect model type of: {}".format(unet_path))
+        self.patch_calculate_weight(model)
         return (model,)
+
+    def patch_calculate_weight(self, model):
+        def calculate_weight(self, patches, weight, key):
+            if isinstance(weight, GGMLTensor):
+                qtype = weight.tensor_type
+                # TODO: don't even store these in a custom format
+                if qtype in [gguf.GGMLQuantizationType.F32, gguf.GGMLQuantizationType.F16]:
+                    return self.calculate_weight_orig(patches, weight, key)
+                else:
+                    weight.patches.append((self.calculate_weight_orig, patches, key))
+                    return weight
+            else:
+                return self.calculate_weight_orig(patches, weight, key)
+
+        # make sure custom patch logic is used as to not mangle quants
+        model.calculate_weight_orig = model.calculate_weight
+        model.calculate_weight = types.MethodType(calculate_weight, model)
+
+        # make sure this logic is preserved for cloned patchers
+        def clone(self, *args, **kwargs):
+            new = self.clone_orig(*args, **kwargs)
+            new.calculate_weight_orig = new.calculate_weight
+            new.calculate_weight = types.MethodType(calculate_weight, model)
+            return new
+
+        model.clone_orig = model.clone
+        model.clone = types.MethodType(clone, model)
+
+        return model
 
 NODE_CLASS_MAPPINGS = {
     "UnetLoaderGGUF": UnetLoaderGGUF,

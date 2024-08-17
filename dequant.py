@@ -4,9 +4,6 @@ import torch
 import numpy as np
 
 def dequantize_tensor(tensor, dtype=torch.float16):
-    if tensor is None:
-        return None
-
     data = torch.tensor(tensor.data)
     qtype = tensor.tensor_type
     oshape = tensor.tensor_shape
