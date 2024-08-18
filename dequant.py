@@ -42,19 +42,25 @@ def to_uint32(x):
     x = x.view(torch.uint8).to(torch.int32) 
     return (x[:, 0] | x[:, 1] << 8 | x[:, 2] << 16 | x[:, 3] << 24).unsqueeze(1)
 
+def split_block_dims(blocks, *args):
+    n_max = blocks.shape[1]
+    dims = list(args) + [n_max - sum(args)]
+    return torch.split(blocks, dims, dim=1)
+
+# Legacy Quants #
+
 def dequantize_blocks_Q8_0(blocks, block_size, type_size, dtype=None):
-    d = blocks[:, :2].view(torch.float16).to(dtype)
-    x = blocks[:, 2:].view(torch.int8)
+    d, x = split_block_dims(blocks, 2)
+    d = d.view(torch.float16).to(dtype)
+    x = x.view(torch.int8)
     return (d * x)
 
 def dequantize_blocks_Q5_1(blocks, block_size, type_size, dtype=None):
     n_blocks = blocks.shape[0]
 
-    d  = blocks[:,  :2].view(torch.float16).to(dtype)
-    m  = blocks[:, 2:4].view(torch.float16).to(dtype)
-    qh = blocks[:, 4:8]
-    qs = blocks[:, 8: ]
-
+    d, m, qh, qs = split_block_dims(blocks, 2, 2, 4)
+    d = d.view(torch.float16).to(dtype)
+    m = m.view(torch.float16).to(dtype)
     qh = to_uint32(qh)
 
     qh = qh.reshape((n_blocks, 1)) >> torch.arange(32, device=d.device, dtype=torch.int32).reshape(1, 32)
@@ -68,10 +74,8 @@ def dequantize_blocks_Q5_1(blocks, block_size, type_size, dtype=None):
 def dequantize_blocks_Q5_0(blocks, block_size, type_size, dtype=None):
     n_blocks = blocks.shape[0]
 
-    d  = blocks[:,  :2].view(torch.float16).to(dtype)
-    qh = blocks[:, 2:6]
-    qs = blocks[:, 6: ]
-
+    d, qh, qs = split_block_dims(blocks, 2, 4)
+    d  = d.view(torch.float16).to(dtype)
     qh = to_uint32(qh)
 
     qh = qh.reshape(n_blocks, 1) >> torch.arange(32, device=d.device, dtype=torch.int32).reshape(1, 32)
@@ -86,9 +90,9 @@ def dequantize_blocks_Q5_0(blocks, block_size, type_size, dtype=None):
 def dequantize_blocks_Q4_1(blocks, block_size, type_size, dtype=None):
     n_blocks = blocks.shape[0]
 
-    d  = blocks[:,  :2].view(torch.float16).to(dtype)
-    m  = blocks[:, 2:4].view(torch.float16).to(dtype)
-    qs = blocks[:, 4: ]
+    d, m, qs = split_block_dims(blocks, 2, 2)
+    d = d.view(torch.float16).to(dtype)
+    m = m.view(torch.float16).to(dtype)
 
     qs = qs.reshape((n_blocks, -1, 1, block_size // 2)) >> torch.tensor([0, 4], device=d.device, dtype=torch.uint8).reshape(1, 1, 2, 1)
     qs = (qs & 0x0F).reshape(n_blocks, -1)
@@ -98,8 +102,8 @@ def dequantize_blocks_Q4_1(blocks, block_size, type_size, dtype=None):
 def dequantize_blocks_Q4_0(blocks, block_size, type_size, dtype=None):
     n_blocks = blocks.shape[0]
 
-    d  = blocks[:,  :2].view(torch.float16).to(dtype)
-    qs = blocks[:,  2:]
+    d, qs = split_block_dims(blocks, 2, 2)
+    d  = d.view(torch.float16).to(dtype)
 
     qs = qs.reshape((n_blocks, -1, 1, block_size // 2)) >> torch.tensor([0, 4], device=d.device, dtype=torch.uint8).reshape((1, 1, 2, 1))
     qs = (qs & 0x0F).reshape((n_blocks, -1)).to(torch.int8) - 8
