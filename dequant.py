@@ -103,7 +103,7 @@ def dequantize_blocks_Q4_1(blocks, block_size, type_size, dtype=None):
 def dequantize_blocks_Q4_0(blocks, block_size, type_size, dtype=None):
     n_blocks = blocks.shape[0]
 
-    d, qs = split_block_dims(blocks, 2, 2)
+    d, qs = split_block_dims(blocks, 2)
     d  = d.view(torch.float16).to(dtype)
 
     qs = qs.reshape((n_blocks, -1, 1, block_size // 2)) >> torch.tensor([0, 4], device=d.device, dtype=torch.uint8).reshape((1, 1, 2, 1))
