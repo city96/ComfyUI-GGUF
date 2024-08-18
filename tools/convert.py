@@ -26,9 +26,10 @@ def parse_args():
         input("Output exists enter to continue or ctrl+c to abort!")
     
     try:
+        args.ftype = getattr(gguf.LlamaFileType, f"MOSTLY_{args.qtype}")
         args.qtype = getattr(gguf.GGMLQuantizationType, args.qtype)
     except AttributeError:
-        parser.error(f"Unknown quant type {args.qtype}")
+        parser.error(f"Unknown quant/file type {args.qtype}")
     
     return args
 
@@ -66,7 +67,7 @@ def load_model(args):
 def handle_metadata(args, writer, state_dict):
     # TODO: actual metadata
     writer.add_quantization_version(gguf.GGML_QUANT_VERSION)
-    writer.add_file_type(args.qtype) # TODO: gguf.LlamaFileType
+    writer.add_file_type(args.ftype)
 
 def handle_tensors(args, writer, state_dict):
     # TODO list:
@@ -143,10 +144,11 @@ def handle_tensors(args, writer, state_dict):
             data_qtype = gguf.GGMLQuantizationType.F16
             data = gguf.quants.quantize(data, data_qtype)
 
+        assert len(key) < 64, f"Invalid key length! Cannot store in gguf file. {key}"
         new_name = key # do we need to rename?
 
         shape_str = f"{{{', '.join(str(n) for n in reversed(data.shape))}}}"
-        tqdm.write(f"{f'%-{max_name_len}s' % f'{new_name},'} {old_dtype} --> {data_qtype.name}, shape = {shape_str}")
+        tqdm.write(f"{f'%-{max_name_len}s' % f'{new_name}'} {old_dtype} --> {data_qtype.name}, shape = {shape_str}")
 
         writer.add_tensor(new_name, data, raw_dtype=data_qtype)
 
