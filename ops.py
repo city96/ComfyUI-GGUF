@@ -34,6 +34,8 @@ class GGMLTensor(torch.Tensor):
 
     @property
     def shape(self):
+        if not hasattr(self, "tensor_shape"):
+            self.tensor_shape = self.size() 
         return self.tensor_shape
 
 class GGMLLayer(torch.nn.Module):
