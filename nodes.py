@@ -13,8 +13,10 @@ import folder_paths
 
 from .ops import GGMLTensor, GGMLOps
 
-# TODO: This causes gguf files to show up in the main unet loader
-folder_paths.folder_names_and_paths["unet"][1].add(".gguf")
+# Add a custom key for files ending in .gguf
+if "unet_gguf" not in folder_paths.folder_names_and_paths:
+    orig = folder_paths.folder_names_and_paths.get("diffusion_models", folder_paths.folder_names_and_paths.get("unet", [[], set()]))
+    folder_paths.folder_names_and_paths["unet_gguf"] = (orig[0], {".gguf"})
 
 def gguf_sd_loader(path):
     """
@@ -43,7 +45,7 @@ def gguf_sd_loader(path):
 class UnetLoaderGGUF:
     @classmethod
     def INPUT_TYPES(s):
-        unet_names = [x for x in folder_paths.get_filename_list("unet") if x.endswith(".gguf")]
+        unet_names = [x for x in folder_paths.get_filename_list("unet_gguf")]
         return {
             "required": {
                 "unet_name": (unet_names,),
