@@ -42,33 +42,6 @@ def gguf_sd_loader(path):
     print("\n")
     return sd
 
-class UnetLoaderGGUF:
-    @classmethod
-    def INPUT_TYPES(s):
-        unet_names = [x for x in folder_paths.get_filename_list("unet_gguf")]
-        return {
-            "required": {
-                "unet_name": (unet_names,),
-            }
-        }
-
-    RETURN_TYPES = ("MODEL",)
-    FUNCTION = "load_unet"
-    CATEGORY = "bootleg"
-    TITLE = "Unet Loader (GGUF)"
-
-    def load_unet(self, unet_name):
-        unet_path = folder_paths.get_full_path("unet", unet_name)
-        sd = gguf_sd_loader(unet_path)
-        model = comfy.sd.load_diffusion_model_state_dict(
-            sd, model_options={"custom_operations": GGMLOps}
-        )
-        if model is None:
-            logging.error("ERROR UNSUPPORTED UNET {}".format(unet_path))
-            raise RuntimeError("ERROR: Could not detect model type of: {}".format(unet_path))
-        model = GGUFModelPatcher.clone(model)
-        return (model,)
-
 # TODO: Temporary fix for now
 class GGUFModelPatcher(comfy.model_patcher.ModelPatcher):
     def calculate_weight(self, patches, weight, key):
@@ -95,6 +68,33 @@ class GGUFModelPatcher(comfy.model_patcher.ModelPatcher):
         n.backup = self.backup
         n.object_patches_backup = self.object_patches_backup
         return n
+
+class UnetLoaderGGUF:
+    @classmethod
+    def INPUT_TYPES(s):
+        unet_names = [x for x in folder_paths.get_filename_list("unet_gguf")]
+        return {
+            "required": {
+                "unet_name": (unet_names,),
+            }
+        }
+
+    RETURN_TYPES = ("MODEL",)
+    FUNCTION = "load_unet"
+    CATEGORY = "bootleg"
+    TITLE = "Unet Loader (GGUF)"
+
+    def load_unet(self, unet_name):
+        unet_path = folder_paths.get_full_path("unet", unet_name)
+        sd = gguf_sd_loader(unet_path)
+        model = comfy.sd.load_diffusion_model_state_dict(
+            sd, model_options={"custom_operations": GGMLOps}
+        )
+        if model is None:
+            logging.error("ERROR UNSUPPORTED UNET {}".format(unet_path))
+            raise RuntimeError("ERROR: Could not detect model type of: {}".format(unet_path))
+        model = GGUFModelPatcher.clone(model)
+        return (model,)
 
 NODE_CLASS_MAPPINGS = {
     "UnetLoaderGGUF": UnetLoaderGGUF,
