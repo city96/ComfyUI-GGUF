@@ -187,6 +187,15 @@ class CLIPLoaderGGUF:
             embedding_directory = folder_paths.get_folder_paths("embeddings"),
         )
         clip.patcher = GGUFModelPatcher.clone(clip.patcher)
+
+        # for some reason this is just missing in some SAI checkpoints
+        if hasattr(clip.cond_stage_model, "clip_l"):
+            if clip.cond_stage_model.clip_l.transformer.text_projection.weight.tensor_shape == None:
+                clip.cond_stage_model.clip_l.transformer.text_projection = comfy.ops.manual_cast.Linear(768, 768)
+        if hasattr(clip.cond_stage_model, "clip_g"):
+            if clip.cond_stage_model.clip_g.transformer.text_projection.weight.tensor_shape == None:
+                clip.cond_stage_model.clip_g.transformer.text_projection = comfy.ops.manual_cast.Linear(1280, 1280)
+
         return clip
 
     def load_clip(self, clip_name, type="stable_diffusion"):
@@ -214,8 +223,30 @@ class DualCLIPLoaderGGUF(CLIPLoaderGGUF):
         clip_type = clip_name_dict.get(type, comfy.sd.CLIPType.STABLE_DIFFUSION)
         return (self.load_patcher(clip_paths, clip_type, self.load_data(clip_paths)),)
 
+class TripleCLIPLoaderGGUF(CLIPLoaderGGUF):
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "clip_name1": (s.get_filename_list(), ),
+                "clip_name2": (s.get_filename_list(), ),
+                "clip_name3": (s.get_filename_list(), ),
+            }
+        }
+
+    TITLE = "TripleCLIPLoader (GGUF)"
+
+    def load_clip(self, clip_name1, clip_name2, clip_name3, type="sd3"):
+        clip_path1 = folder_paths.get_full_path("clip", clip_name1)
+        clip_path2 = folder_paths.get_full_path("clip", clip_name2)
+        clip_path3 = folder_paths.get_full_path("clip", clip_name3)
+        clip_paths = [clip_path1, clip_path2, clip_path3]
+        clip_type = clip_name_dict.get(type, comfy.sd.CLIPType.STABLE_DIFFUSION)
+        return (self.load_patcher(clip_paths, clip_type, self.load_data(clip_paths)),)
+
 NODE_CLASS_MAPPINGS = {
     "UnetLoaderGGUF": UnetLoaderGGUF,
     "CLIPLoaderGGUF": CLIPLoaderGGUF,
     "DualCLIPLoaderGGUF": DualCLIPLoaderGGUF,
+    "TripleCLIPLoaderGGUF": TripleCLIPLoaderGGUF,
 }
