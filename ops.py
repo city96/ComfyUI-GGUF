@@ -119,7 +119,7 @@ class GGMLLayer(torch.nn.Module):
         bias = self.get_weight(self.bias, dtype)
         return (weight, bias)
 
-class GGMLOps(comfy.ops.disable_weight_init):
+class GGMLOps(comfy.ops.manual_cast):
     """
     Dequantize weights on the fly before doing the compute
     """
