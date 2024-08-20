@@ -32,6 +32,13 @@ class GGMLTensor(torch.Tensor):
     def detach(self, *args, **kwargs):
         return self
 
+    def copy_(self, *args, **kwargs):
+        # fixes .weight.copy_ in comfy/clip_model/CLIPTextModel
+        try:
+            return super().copy_(*args, **kwargs)
+        except Exception as e:
+            print(f"ignoring 'copy_' on tensor")
+
     @property
     def shape(self):
         if not hasattr(self, "tensor_shape"):
@@ -44,7 +51,7 @@ class GGMLLayer(torch.nn.Module):
     """
     def __init__(self, *args, **kwargs):
         super().__init__()
-        self.weight = None
+        self.weight = GGMLTensor(1, tensor_type=None, tensor_shape=None)
         self.bias = None
 
     def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):
@@ -119,7 +126,7 @@ class GGMLLayer(torch.nn.Module):
         bias = self.get_weight(self.bias, dtype)
         return (weight, bias)
 
-class GGMLOps(comfy.ops.disable_weight_init):
+class GGMLOps(comfy.ops.manual_cast):
     """
     Dequantize weights on the fly before doing the compute
     """
