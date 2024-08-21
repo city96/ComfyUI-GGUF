@@ -1,6 +1,7 @@
 *.bin
 *.gguf
 *.safetensors
+tools/llama.cpp/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

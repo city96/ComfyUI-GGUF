@@ -1,0 +1,173 @@
+diff --git a/src/llama.cpp b/src/llama.cpp
+index 5ab65ea9..44fe3fe6 100644
+--- a/src/llama.cpp
++++ b/src/llama.cpp
+@@ -212,6 +212,8 @@ enum llm_arch {
+     LLM_ARCH_JAIS,
+     LLM_ARCH_NEMOTRON,
+     LLM_ARCH_EXAONE,
++    LLM_ARCH_FLUX,
++    LLM_ARCH_SD1,
+     LLM_ARCH_UNKNOWN,
+ };
+ 
+@@ -259,6 +261,8 @@ static const std::map<llm_arch, const char *> LLM_ARCH_NAMES = {
+     { LLM_ARCH_JAIS,            "jais"         },
+     { LLM_ARCH_NEMOTRON,        "nemotron"     },
+     { LLM_ARCH_EXAONE,          "exaone"       },
++    { LLM_ARCH_FLUX,            "flux"         },
++    { LLM_ARCH_SD1,             "sd1"          },
+     { LLM_ARCH_UNKNOWN,         "(unknown)"    },
+ };
+ 
+@@ -1337,6 +1341,8 @@ static const std::map<llm_arch, std::map<llm_tensor, std::string>> LLM_TENSOR_NA
+             { LLM_TENSOR_FFN_UP,          "blk.%d.ffn_up" },
+         },
+     },
++    { LLM_ARCH_FLUX, { {} }, },
++    { LLM_ARCH_SD1, { {} }, },
+     {
+         LLM_ARCH_UNKNOWN,
+         {
+@@ -4629,6 +4635,13 @@ static void llm_load_hparams(
+     // get general kv
+     ml.get_key(LLM_KV_GENERAL_NAME, model.name, false);
+ 
++    // Disable LLM metadata for image models
++    if (model.arch == LLM_ARCH_FLUX) {
++        model.ftype = ml.ftype;
++        hparams.rope_type = llama_rope_type(&model);
++        return;
++    }
++
+     // get hparams kv
+     ml.get_key(LLM_KV_VOCAB_SIZE, hparams.n_vocab, false) || ml.get_arr_n(LLM_KV_TOKENIZER_LIST, hparams.n_vocab);
+ 
+@@ -15854,26 +15867,40 @@ static ggml_type llama_tensor_get_type(quantize_state_internal & qs, ggml_type n
+         return std::make_pair(i_layer, n_layer);
+     };
+ 
++    if (
++            (name.find("model.diffusion_model.") != std::string::npos) ||
++            (name.find("first_stage_model.") != std::string::npos) ||
++            (name.find("single_transformer_blocks.") != std::string::npos)
++        ) {
++            throw std::runtime_error("Invalid input GGUF file. This is not a supported UNET model");
++    }
++
+     // for arches that share the same tensor between the token embeddings and the output, we quantize the token embeddings
+     // with the quantization of the output tensor
+-    if (name == tn(LLM_TENSOR_OUTPUT, "weight") || (!qs.has_output && name == tn(LLM_TENSOR_TOKEN_EMBD, "weight"))) {
+-        if (qs.params->output_tensor_type < GGML_TYPE_COUNT) {
+-            new_type = qs.params->output_tensor_type;
+-        } else {
+-            int nx = tensor->ne[0];
+-            if (arch == LLM_ARCH_FALCON || nx % QK_K != 0) {
+-                new_type = GGML_TYPE_Q8_0;
+-            }
+-            else if (ftype == LLAMA_FTYPE_MOSTLY_IQ2_XXS || ftype == LLAMA_FTYPE_MOSTLY_IQ2_XS || ftype == LLAMA_FTYPE_MOSTLY_IQ3_XXS ||
+-                     ftype == LLAMA_FTYPE_MOSTLY_IQ1_S   || ftype == LLAMA_FTYPE_MOSTLY_IQ2_S  || ftype == LLAMA_FTYPE_MOSTLY_IQ2_M   ||
+-                     ftype == LLAMA_FTYPE_MOSTLY_IQ1_M) {
+-                new_type = GGML_TYPE_Q5_K;
+-            }
+-            else if (new_type != GGML_TYPE_Q8_0) {
+-                new_type = GGML_TYPE_Q6_K;
+-            }
+-        }
+-    } else if (name == "token_embd.weight") {
++    if ( // KEEP IN FP32
++            (name == tn(LLM_TENSOR_OUTPUT, "weight")) ||
++            (!qs.has_output && name == tn(LLM_TENSOR_TOKEN_EMBD, "weight")) ||
++            (name.find("img_in.") != std::string::npos) ||
++            (name.find("time_in.in_layer.") != std::string::npos) ||
++            (name.find("vector_in.in_layer.") != std::string::npos) ||
++            (name.find("guidance_in.in_layer.") != std::string::npos) ||
++            (name.find("final_layer.linear.") != std::string::npos)
++        ) {
++            if (qs.params->output_tensor_type < GGML_TYPE_COUNT) {
++                new_type = qs.params->output_tensor_type;
++            } else {
++                new_type = GGML_TYPE_F32;
++            }
++    } else if ( // KEEP IN FP16
++            (name == "token_embd.weight") ||
++            (name.find("time_embedding.") != std::string::npos) ||
++            (name.find("add_embedding.") != std::string::npos) ||
++            (name.find("txt_in.") != std::string::npos) ||
++            (name.find("time_in.") != std::string::npos) ||
++            (name.find("vector_in.") != std::string::npos) ||
++            (name.find("guidance_in.") != std::string::npos) ||
++            (name.find("final_layer.") != std::string::npos)
++        ) {
+         if (qs.params->token_embedding_type < GGML_TYPE_COUNT) {
+             new_type = qs.params->token_embedding_type;
+         } else {
+@@ -15891,10 +15918,13 @@ static ggml_type llama_tensor_get_type(quantize_state_internal & qs, ggml_type n
+                      new_type == GGML_TYPE_Q4_0_8_8) {
+                 new_type = GGML_TYPE_Q4_0;
+             }
++            else { // if (ftype == LLAMA_FTYPE_MOSTLY_Q6_K || ftype == LLAMA_FTYPE_MOSTLY_Q5_K_M) {
++                new_type = GGML_TYPE_F16;
++            }
+         }
+     } else if (ftype == LLAMA_FTYPE_MOSTLY_IQ2_XXS || ftype == LLAMA_FTYPE_MOSTLY_IQ2_XS || ftype == LLAMA_FTYPE_MOSTLY_IQ1_S ||
+                ftype == LLAMA_FTYPE_MOSTLY_IQ2_S || ftype == LLAMA_FTYPE_MOSTLY_IQ2_M    || ftype == LLAMA_FTYPE_MOSTLY_IQ1_M) {
+-        if (name.find("attn_v.weight") != std::string::npos) {
++        if ((name.find("attn_v.weight") != std::string::npos) || (name.find(".to_v.weight") != std::string::npos)) {
+             if (qs.model.hparams.n_gqa() >= 4 || qs.model.hparams.n_expert >= 4) new_type = GGML_TYPE_Q4_K;
+             else new_type = ftype == LLAMA_FTYPE_MOSTLY_IQ2_S || ftype == LLAMA_FTYPE_MOSTLY_IQ2_M ? GGML_TYPE_IQ3_S : GGML_TYPE_Q2_K;
+             ++qs.i_attention_wv;
+@@ -15916,7 +15946,7 @@ static ggml_type llama_tensor_get_type(quantize_state_internal & qs, ggml_type n
+                 else if (ftype == LLAMA_FTYPE_MOSTLY_IQ2_S || ftype == LLAMA_FTYPE_MOSTLY_IQ2_M) new_type = GGML_TYPE_IQ3_S;
+             }
+         }
+-    } else if (name.find("attn_v.weight") != std::string::npos) {
++    } else if ((name.find("attn_v.weight") != std::string::npos) || (name.find(".to_v.weight") != std::string::npos)) {
+         if      (ftype == LLAMA_FTYPE_MOSTLY_Q2_K) {
+             new_type = qs.model.hparams.n_gqa() >= 4 ? GGML_TYPE_Q4_K : GGML_TYPE_Q3_K;
+         }
+@@ -15954,7 +15984,7 @@ static ggml_type llama_tensor_get_type(quantize_state_internal & qs, ggml_type n
+             new_type = GGML_TYPE_Q8_0;
+         }
+         ++qs.i_attention_wv;
+-    } else if (name.find("attn_k.weight") != std::string::npos) {
++    } else if ((name.find("attn_k.weight") != std::string::npos) || (name.find("to_k.weight") != std::string::npos)) {
+         if (qs.model.hparams.n_expert == 8) {
+             // for the 8-expert model, bumping this to Q8_0 trades just ~128MB
+             // TODO: explore better strategies
+@@ -15966,7 +15996,7 @@ static ggml_type llama_tensor_get_type(quantize_state_internal & qs, ggml_type n
+         else if (ftype == LLAMA_FTYPE_MOSTLY_IQ3_XXS) {
+             new_type = GGML_TYPE_IQ2_S;
+         }
+-    } else if (name.find("attn_q.weight") != std::string::npos) {
++    } else if ((name.find("attn_q.weight") != std::string::npos) || (name.find("to_q.weight") != std::string::npos)) {
+         if (ftype == LLAMA_FTYPE_MOSTLY_IQ3_XS) {
+             new_type = GGML_TYPE_IQ3_XXS;
+         }
+@@ -16038,7 +16068,7 @@ static ggml_type llama_tensor_get_type(quantize_state_internal & qs, ggml_type n
+             if (ftype == LLAMA_FTYPE_MOSTLY_Q3_K_L) new_type = GGML_TYPE_Q4_K;
+         }
+     }
+-    else if (name.find("attn_qkv.weight") != std::string::npos) {
++    else if ((name.find("attn_qkv.weight") != std::string::npos) || (name.find("attn.qkv.weight") != std::string::npos)) {
+         if (ftype == LLAMA_FTYPE_MOSTLY_Q3_K_M || ftype == LLAMA_FTYPE_MOSTLY_Q3_K_L || ftype == LLAMA_FTYPE_MOSTLY_IQ3_M) {
+             new_type = GGML_TYPE_Q4_K;
+         }
+@@ -16107,6 +16137,8 @@ static ggml_type llama_tensor_get_type(quantize_state_internal & qs, ggml_type n
+         }
+         LLAMA_LOG_WARN(" - using fallback quantization %s\n", ggml_type_name(new_type));
+         ++qs.n_fallback;
++        // Force FP16 fallback - needed due to Conv2D
++        new_type = GGML_TYPE_F16;
+     }
+ 
+     return new_type;
+@@ -17432,6 +17464,8 @@ enum llama_rope_type llama_rope_type(const struct llama_model * model) {
+         case LLM_ARCH_T5:
+         case LLM_ARCH_T5ENCODER:
+         case LLM_ARCH_JAIS:
++        case LLM_ARCH_FLUX:
++        case LLM_ARCH_SD1:
+             return LLAMA_ROPE_TYPE_NONE;
+ 
+         // use what we call a normal RoPE, operating on pairs of consecutive head values

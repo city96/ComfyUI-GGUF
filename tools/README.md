@@ -5,15 +5,45 @@ git clone https://github.com/ggerganov/llama.cpp
 pip install llama.cpp/gguf-py
 ```
 
-To quantize:
+
+To convert your initial source model to FP16 (or BF16), run the following command:
 ```
-python convert.py --src ~/ComfyUI/models/unet/flux1-dev.safetensors --dst ~/ComfyUI/models/unet/flux1-dev-Q4_0.gguf --qtype Q4_0
+python convert.py --src E:\models\unet\flux1-dev.safetensors
 ```
 
-Working quant types: Q4_0, Q5_0, Q8_0, F16
+
+To quantize the model, first apply the provided patch to the llama.cpp repo you've just cloned.
+```
+cd llama.cpp
+git checkout tags/b3600
+git apply ..\lcpp.patch
+```
+
+
+The compile the llama-quantize binary. This example uses cmake, on linux you can just use make.
+```
+mkdir build
+cd build
+cmake ..
+cmake --build . --config Debug -j10 --target llama-quantize
+cd ..
+cd ..
+```
+
+
+Now you can use the newly build binary to quantize your model to the desired format:
+```
+llama.cpp\build\bin\Debug\llama-quantize.exe E:\models\unet\flux1-dev-BF16.gguf E:\models\unet\flux1-dev-Q4_K_S.gguf Q4_K_S
+```
+
+
+You can extract the patch again with `git diff src\llama.cpp > lcpp.patch` if you wish to change something and contribute back.
+
 
 > [!WARNING]  
-> Do not use the diffusers UNET for flux, it won't work, use the default checkpoint that comes with the model or convert it.
+> Do not use the diffusers UNET for flux, it won't work, use the default/reference checkpoint format. This is due to q/k/v being merged into one qkv key. You can convert it by loading it in ComfyUI and saving it using the built-in "ModelSave" node.
 
-> [!IMPORTANT]  
-> The model format is very much WIP. I don't recommend uploading the model files created with this method anywhere until proper metadata is added, although the key/quantization format is unlikely to change.
+
+> [!WARNING]  
+> Do not quantize SDXL / SD1 / other Conv2D heavy models. There's little to no benefit with these models. If you do, make sure to **extract the UNET model first**.
+>This should be obvious, but also don't use the resulting llama-quantize binary with LLMs.
