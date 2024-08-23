@@ -34,9 +34,7 @@ def gguf_sd_loader(path):
         sd[str(tensor.name)] = GGMLTensor(
             torch.from_numpy(tensor.data), # mmap
             tensor_type = tensor.tensor_type,
-            tensor_shape = torch.Size(
-                np.flip(list(tensor.shape))
-            )
+            tensor_shape = torch.Size(tuple(int(v) for v in reversed(tensor.shape)))
         )
         dt[str(tensor.tensor_type)] = dt.get(str(tensor.tensor_type), 0) + 1
 

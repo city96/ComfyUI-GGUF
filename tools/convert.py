@@ -13,6 +13,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Generate F16 GGUF files from single UNET")
     parser.add_argument("--src", required=True, help="Source model ckpt file.")
     parser.add_argument("--dst", help="Output  unet gguf file.")
+    parser.add_argument("--force-arch", type=str, choices=("flux", "sd1", "sdxl"), default=None, help="Advanced option, allows forcing the model architecture. May be necessary for non-Flux models.")
     args = parser.parse_args()
 
     if not os.path.isfile(args.src):
@@ -39,11 +40,12 @@ def load_state_dict(path):
 
     return sd
 
-def load_model(path):
+def load_model(path, force_arch=None):
     state_dict = load_state_dict(path)
-
     # from ComfyUI model detection
-    if "transformer_blocks.0.attn.norm_added_k.weight" in state_dict:
+    if force_arch is not None:
+        arch = force_arch
+    elif "transformer_blocks.0.attn.norm_added_k.weight" in state_dict:
         arch = "flux"
         raise ValueError(f"The Diffusers UNET can not be used for this!")
     elif "double_blocks.0.img_attn.proj.weight" in state_dict:
@@ -54,7 +56,7 @@ def load_model(path):
         if "add_embedding.linear_1.weight" in state_dict:
             arch = "sdxl"
         else:
-            arch = "sd1" 
+            arch = "sd1"
     else:
         breakpoint()
         raise ValueError(f"Unknown model architecture!")
@@ -141,7 +143,7 @@ def handle_tensors(args, writer, state_dict):
 if __name__ == "__main__":
     args = parse_args()
     path = args.src
-    writer, state_dict = load_model(path)
+    writer, state_dict = load_model(path, force_arch=args.force_arch)
 
     writer.add_quantization_version(gguf.GGML_QUANT_VERSION)
     if next(iter(state_dict.values())).dtype == torch.bfloat16:
