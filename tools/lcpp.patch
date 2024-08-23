@@ -1,5 +1,5 @@
 diff --git a/src/llama.cpp b/src/llama.cpp
-index 5ab65ea9..ef63e28f 100644
+index 5ab65ea9..6d684fef 100644
 --- a/src/llama.cpp
 +++ b/src/llama.cpp
 @@ -212,6 +212,9 @@ enum llm_arch {
@@ -156,15 +156,15 @@ index 5ab65ea9..ef63e28f 100644
          if (ftype == LLAMA_FTYPE_MOSTLY_Q3_K_M || ftype == LLAMA_FTYPE_MOSTLY_Q3_K_L || ftype == LLAMA_FTYPE_MOSTLY_IQ3_M) {
              new_type = GGML_TYPE_Q4_K;
          }
-@@ -16107,6 +16140,8 @@ static ggml_type llama_tensor_get_type(quantize_state_internal & qs, ggml_type n
+@@ -16105,6 +16138,8 @@ static ggml_type llama_tensor_get_type(quantize_state_internal & qs, ggml_type n
+             case GGML_TYPE_Q6_K:   new_type = GGML_TYPE_Q8_0;   break;
+             default: throw std::runtime_error("\nUnsupported tensor size encountered\n");
          }
-         LLAMA_LOG_WARN(" - using fallback quantization %s\n", ggml_type_name(new_type));
-         ++qs.n_fallback;
 +        // Force FP16 fallback - needed due to Conv2D
 +        new_type = GGML_TYPE_F16;
+         LLAMA_LOG_WARN(" - using fallback quantization %s\n", ggml_type_name(new_type));
+         ++qs.n_fallback;
      }
- 
-     return new_type;
 @@ -17432,6 +17467,9 @@ enum llama_rope_type llama_rope_type(const struct llama_model * model) {
          case LLM_ARCH_T5:
          case LLM_ARCH_T5ENCODER:
