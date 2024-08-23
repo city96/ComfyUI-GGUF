@@ -83,18 +83,40 @@ def gguf_clip_loader(path):
     return sd
 
 # TODO: Temporary fix for now
+import collections
 class GGUFModelPatcher(comfy.model_patcher.ModelPatcher):
-    def calculate_weight(self, patches, weight, key):
-        if isinstance(weight, GGMLTensor):
-            qtype = weight.tensor_type
-            # TODO: don't even store these in a custom format
-            if qtype in [gguf.GGMLQuantizationType.F32, gguf.GGMLQuantizationType.F16]:
-                return super().calculate_weight(patches, weight, key)
-            else:
-                weight.patches.append((super().calculate_weight, patches, key))
-                return weight
+    def patch_weight_to_device(self, key, device_to=None, inplace_update=False):
+        if key not in self.patches:
+            return
+        weight = comfy.utils.get_attr(self.model, key)
+        inplace_update = self.weight_inplace_update or inplace_update
+        if key not in self.backup:
+            self.backup[key] = collections.namedtuple('Dimension', ['weight', 'inplace_update'])(weight.to(device=self.offload_device, copy=inplace_update), inplace_update)
+    
+        qtype = getattr(weight, "tensor_type", None)
+
+        try:
+            from comfy.lora import calculate_weight
+        except:
+            calculate_weight = self.calculate_weight
+
+        if qtype not in [None, gguf.GGMLQuantizationType.F32, gguf.GGMLQuantizationType.F16]:
+            out_weight = weight.clone()
+            out_weight.patches.append((calculate_weight, self.patches[key], key))
+            
         else:
-            return super().calculate_weight(patches, weight, key)
+            if device_to is not None:
+                temp_weight = comfy.model_management.cast_to_device(weight, device_to, torch.float32, copy=True)
+            else:
+                temp_weight = weight.to(torch.float32, copy=True)
+
+            out_weight = calculate_weight(self.patches[key], temp_weight, key)
+            out_weight = comfy.float.stochastic_rounding(out_weight, weight.dtype)
+
+        if inplace_update:
+            comfy.utils.copy_to_param(self.model, key, out_weight)
+        else:
+            comfy.utils.set_attr_param(self.model, key, out_weight)
 
     def clone(self, *args, **kwargs):
         n = GGUFModelPatcher(self.model, self.load_device, self.offload_device, self.size, weight_inplace_update=self.weight_inplace_update)
