@@ -6,10 +6,12 @@ from tqdm import tqdm
 
 def dequantize_tensor(tensor, dtype=torch.float16):
     data = torch.tensor(tensor.data)
-    qtype = tensor.tensor_type
-    oshape = tensor.tensor_shape
+    qtype = getattr(tensor, "tensor_type", None)
+    oshape = getattr(tensor, "tensor_shape", tensor.data.shape)
 
-    if qtype == gguf.GGMLQuantizationType.F32:
+    if qtype == None:
+        return data.to(dtype)
+    elif qtype == gguf.GGMLQuantizationType.F32:
         return data.to(dtype)
     elif qtype == gguf.GGMLQuantizationType.F16:
         return data.to(dtype)

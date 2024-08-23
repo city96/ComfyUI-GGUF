@@ -190,10 +190,10 @@ class CLIPLoaderGGUF:
 
         # for some reason this is just missing in some SAI checkpoints
         if getattr(clip.cond_stage_model, "clip_l", None) is not None:
-            if clip.cond_stage_model.clip_l.transformer.text_projection.weight.tensor_shape == None:
+            if getattr(clip.cond_stage_model.clip_l.transformer.text_projection.weight, "tensor_shape", None) == None:
                 clip.cond_stage_model.clip_l.transformer.text_projection = comfy.ops.manual_cast.Linear(768, 768)
         if getattr(clip.cond_stage_model, "clip_g", None) is not None:
-            if clip.cond_stage_model.clip_g.transformer.text_projection.weight.tensor_shape == None:
+            if getattr(clip.cond_stage_model.clip_g.transformer.text_projection.weight, "tensor_shape", None) == None:
                 clip.cond_stage_model.clip_g.transformer.text_projection = comfy.ops.manual_cast.Linear(1280, 1280)
 
         return clip

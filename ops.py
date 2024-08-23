@@ -21,9 +21,9 @@ class GGMLTensor(torch.Tensor):
 
     def to(self, *args, **kwargs):
         new = super().to(*args, **kwargs)
-        new.tensor_type = self.tensor_type
-        new.tensor_shape = self.tensor_shape
-        new.patches = self.patches.copy()
+        new.tensor_type = getattr(self, "tensor_type", None)
+        new.tensor_shape = getattr(self, "tensor_shape", new.data.shape)
+        new.patches = getattr(self, "patches", []).copy()
         return new
 
     def clone(self, *args, **kwargs):
