@@ -101,7 +101,10 @@ class GGUFModelPatcher(comfy.model_patcher.ModelPatcher):
             calculate_weight = self.calculate_weight
 
         if qtype not in [None, gguf.GGMLQuantizationType.F32, gguf.GGMLQuantizationType.F16]:
-            out_weight = weight.clone()
+            if device_to is not None:
+                out_weight = weight.to(device_to, copy=True)
+            else:
+                out_weight = weight.clone()
             out_weight.patches.append((calculate_weight, self.patches[key], key))
             
         else:
