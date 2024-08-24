@@ -28,13 +28,24 @@ def gguf_sd_loader(path):
     Read state dict as fake tensors
     """
     reader = gguf.GGUFReader(path)
+    fixup_field = reader.get_field("comfy.gguf.tensor_fixup")
+    tensor_fixup = {}
+    if fixup_field is not None:
+        tensor_fixup_str=str(fixup_field.parts[fixup_field.data[-1]], encoding="utf-8")
+        for line in str(tensor_fixup_str).split("\n"):
+            key, *fixup_items = line.split(" ")
+            tensor_fixup[key] = torch.Size(tuple(int(i) for i in fixup_items))
     sd = {}
     dt = {}
     for tensor in reader.tensors:
-        sd[str(tensor.name)] = GGMLTensor(
+        tensor_name = str(tensor.name)
+        shape = tensor_fixup.get(tensor_name)
+        if shape is None:
+            shape = torch.Size(tuple(int(v) for v in reversed(tensor.shape)))
+        sd[tensor_name] = GGMLTensor(
             torch.from_numpy(tensor.data), # mmap
             tensor_type = tensor.tensor_type,
-            tensor_shape = torch.Size(tuple(int(v) for v in reversed(tensor.shape)))
+            tensor_shape = shape
         )
         dt[str(tensor.tensor_type)] = dt.get(str(tensor.tensor_type), 0) + 1
 

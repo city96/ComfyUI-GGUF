@@ -16,7 +16,7 @@ class GGMLTensor(torch.Tensor):
         self.tensor_shape = tensor_shape
         self.patches = patches
 
-    def __new__(cls, *args, tensor_type, tensor_shape, patches=[], **kwargs):
+    def __new__(cls, *args, tensor_type, tensor_shape, tensor_data=None, patches=[], **kwargs):
         return super().__new__(cls, *args, **kwargs)
 
     def to(self, *args, **kwargs):
@@ -145,6 +145,29 @@ class GGMLOps(comfy.ops.manual_cast):
 
             weight, bias = self.get_weights(x.dtype)
             x = torch.nn.functional.linear(x, weight, bias)
+            del weight, bias
+
+            if device:
+                self.to(device)
+            return x
+
+    class Conv2d(GGMLLayer):
+        comfy_cast_weights = True
+
+        def __init__(self, *args, device=None, dtype=None, **kwargs):
+            super().__init__(device=device, dtype=dtype)
+            _ = kwargs.pop("kernel_size", None)
+            self.kwargs=kwargs
+
+        def forward(self, x):
+            # lowvram hack
+            device = None
+            if self.weight.device != x.device:
+                device = self.weight.device
+                self.to(x.device)
+
+            weight, bias = self.get_weights(x.dtype)
+            x = torch.nn.functional.conv2d(x, weight, bias, **self.kwargs)
             del weight, bias
 
             if device:

@@ -69,6 +69,9 @@ def handle_tensors(args, writer, state_dict):
     # - do something about this being awful and hacky
 
     max_name_len = max([len(s) for s in state_dict.keys()]) + 4
+    if (max_name_len - 4) >= 64:
+        raise ValueError("Can only handle tensor names up to 63 characters!")
+    tensor_fixup = {}
     for key, data in tqdm(state_dict.items()):
         old_dtype = data.dtype
 
@@ -122,6 +125,11 @@ def handle_tensors(args, writer, state_dict):
                 #data = np.squeeze(data) # don't do this
                 data_qtype = gguf.GGMLQuantizationType.F16
 
+        if data_qtype != gguf.GGMLQuantizationType.F32 and n_dims >= 2 and n_params >= 256*256 and (n_params / 256).is_integer() and data.shape[0] >= 256 and data.shape[1] >= 256:
+            orig_shape=data.shape
+            orig_n_params=n_params
+            data = data.reshape(256+((n_params - 256*256) // 256),256)
+            tensor_fixup[key] = orig_shape
         try:
             data = gguf.quants.quantize(data, data_qtype)
         except gguf.QuantError as e:
@@ -139,6 +147,8 @@ def handle_tensors(args, writer, state_dict):
         tqdm.write(f"{f'%-{max_name_len}s' % f'{new_name}'} {old_dtype} --> {data_qtype.name}, shape = {shape_str}")
 
         writer.add_tensor(new_name, data, raw_dtype=data_qtype)
+    fixup_str = "\n".join(" ".join((k,)+tuple(str(dimval) for dimval in v)) for k,v in tensor_fixup.items())
+    writer.add_string("comfy.gguf.tensor_fixup", fixup_str)
 
 if __name__ == "__main__":
     args = parse_args()
