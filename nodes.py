@@ -11,7 +11,7 @@ import comfy.model_management
 import comfy.model_patcher
 import folder_paths
 
-from .ops import GGMLTensor, GGMLOps
+from .ops import GGMLTensor, GGMLOps, move_patch_to_cuda
 from .dequant import dequantize_tensor
 
 # Add a custom keys for files ending in .gguf
@@ -85,6 +85,8 @@ def gguf_clip_loader(path):
 # TODO: Temporary fix for now
 import collections
 class GGUFModelPatcher(comfy.model_patcher.ModelPatcher):
+    patch_on_device = False
+
     def patch_weight_to_device(self, key, device_to=None, inplace_update=False):
         if key not in self.patches:
             return
@@ -92,20 +94,23 @@ class GGUFModelPatcher(comfy.model_patcher.ModelPatcher):
         inplace_update = self.weight_inplace_update or inplace_update
         if key not in self.backup:
             self.backup[key] = collections.namedtuple('Dimension', ['weight', 'inplace_update'])(weight.to(device=self.offload_device, copy=inplace_update), inplace_update)
-    
-        qtype = getattr(weight, "tensor_type", None)
 
         try:
             from comfy.lora import calculate_weight
         except:
             calculate_weight = self.calculate_weight
 
+        patches = self.patches[key]
+        qtype = getattr(weight, "tensor_type", None)
         if qtype not in [None, gguf.GGMLQuantizationType.F32, gguf.GGMLQuantizationType.F16]:
             if device_to is not None:
                 out_weight = weight.to(device_to, copy=True)
             else:
                 out_weight = weight.clone()
-            out_weight.patches.append((calculate_weight, self.patches[key], key))
+            
+            if self.patch_on_device:
+                patches = move_patch_to_cuda(patches, self.load_device)
+            out_weight.patches.append((calculate_weight, patches, key))
             
         else:
             if device_to is not None:
@@ -113,7 +118,7 @@ class GGUFModelPatcher(comfy.model_patcher.ModelPatcher):
             else:
                 temp_weight = weight.to(torch.float32, copy=True)
 
-            out_weight = calculate_weight(self.patches[key], temp_weight, key)
+            out_weight = calculate_weight(patches, temp_weight, key)
             out_weight = comfy.float.stochastic_rounding(out_weight, weight.dtype)
 
         if inplace_update:
@@ -132,6 +137,7 @@ class GGUFModelPatcher(comfy.model_patcher.ModelPatcher):
         n.model_options = copy.deepcopy(self.model_options)
         n.backup = self.backup
         n.object_patches_backup = self.object_patches_backup
+        n.patch_on_device = getattr(self, "patch_on_device", False)
         return n
 
 class UnetLoaderGGUF:
@@ -149,17 +155,49 @@ class UnetLoaderGGUF:
     CATEGORY = "bootleg"
     TITLE = "Unet Loader (GGUF)"
 
-    def load_unet(self, unet_name):
+    def load_unet(self, unet_name, dequant_dtype=None, patch_dtype=None, patch_on_device=None):
+        ops = GGMLOps()
+
+        if dequant_dtype in ["default", None]:
+            ops.Linear.dequant_dtype = None
+        elif dequant_dtype in ["target"]:
+            ops.Linear.dequant_dtype = dequant_dtype
+        else:
+            ops.Linear.dequant_dtype = getattr(torch, dequant_dtype)
+
+        if patch_dtype in ["default", None]:
+            ops.Linear.patch_dtype = None
+        elif patch_dtype in ["target"]:
+            ops.Linear.patch_dtype = patch_dtype
+        else:
+            ops.Linear.patch_dtype = getattr(torch, patch_dtype)
+
+        # init model
         unet_path = folder_paths.get_full_path("unet", unet_name)
         sd = gguf_sd_loader(unet_path)
         model = comfy.sd.load_diffusion_model_state_dict(
-            sd, model_options={"custom_operations": GGMLOps}
+            sd, model_options={"custom_operations": ops}
         )
         if model is None:
             logging.error("ERROR UNSUPPORTED UNET {}".format(unet_path))
             raise RuntimeError("ERROR: Could not detect model type of: {}".format(unet_path))
         model = GGUFModelPatcher.clone(model)
+        model.patch_on_device = patch_on_device
         return (model,)
+
+class UnetLoaderGGUFAdvanced(UnetLoaderGGUF):
+    @classmethod
+    def INPUT_TYPES(s):
+        unet_names = [x for x in folder_paths.get_filename_list("unet_gguf")]
+        return {
+            "required": {
+                "unet_name": (unet_names,),
+                "dequant_dtype": (["default", "target", "float32", "float16", "bfloat16"], {"default": "default"}),
+                "patch_dtype": (["default", "target", "float32", "float16", "bfloat16"], {"default": "default"}),
+                "patch_on_device": ("BOOLEAN", {"default": False}),
+            }
+        }
+    TITLE = "Unet Loader (GGUF/Advanced)"
 
 clip_name_dict = {
     "stable_diffusion": comfy.sd.CLIPType.STABLE_DIFFUSION,
@@ -274,4 +312,5 @@ NODE_CLASS_MAPPINGS = {
     "CLIPLoaderGGUF": CLIPLoaderGGUF,
     "DualCLIPLoaderGGUF": DualCLIPLoaderGGUF,
     "TripleCLIPLoaderGGUF": TripleCLIPLoaderGGUF,
+    "UnetLoaderGGUFAdvanced": UnetLoaderGGUFAdvanced,
 }

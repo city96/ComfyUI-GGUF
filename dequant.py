@@ -1,24 +1,18 @@
 # (c) City96 || Apache-2.0 (apache.org/licenses/LICENSE-2.0)
 import gguf
 import torch
-import numpy as np
 from tqdm import tqdm
 
-def dequantize_tensor(tensor, dtype=torch.float16):
+def dequantize_tensor(tensor, dtype=None, dequant_dtype=None):
     data = torch.tensor(tensor.data)
     qtype = getattr(tensor, "tensor_type", None)
     oshape = getattr(tensor, "tensor_shape", tensor.data.shape)
 
-    if qtype == None:
-        return data.to(dtype)
-    elif qtype == gguf.GGMLQuantizationType.F32:
-        return data.to(dtype)
-    elif qtype == gguf.GGMLQuantizationType.F16:
+    if qtype in [None, gguf.GGMLQuantizationType.F32, gguf.GGMLQuantizationType.F16]:
         return data.to(dtype)
     elif qtype in dequantize_functions:
-        # dequantize in fp16 then convert instead of keeping FP32
-        out = dequantize(data, qtype, oshape, dtype=None)
-        return out.to(dtype) if out.dtype != dtype else out # why is .to() not a no-op?
+        dequant_dtype = dtype if dequant_dtype == "target" else dequant_dtype
+        return dequantize(data, qtype, oshape, dtype=dequant_dtype).to(dtype)
     else:
         # this is incredibly slow
         tqdm.write(f"Falling back to numpy dequant for qtype: {qtype}")
