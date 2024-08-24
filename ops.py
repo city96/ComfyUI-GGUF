@@ -39,6 +39,14 @@ class GGMLTensor(torch.Tensor):
         except Exception as e:
             print(f"ignoring 'copy_' on tensor")
 
+    def __deepcopy__(self, *args, **kwargs):
+        # Intel Arc fix, ref#50
+        new = super().__deepcopy__(*args, **kwargs)
+        new.tensor_type = getattr(self, "tensor_type", None)
+        new.tensor_shape = getattr(self, "tensor_shape", new.data.shape)
+        new.patches = getattr(self, "patches", []).copy()
+        return new
+
     @property
     def shape(self):
         if not hasattr(self, "tensor_shape"):
