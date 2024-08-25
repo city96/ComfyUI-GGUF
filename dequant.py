@@ -4,11 +4,11 @@ import torch
 from tqdm import tqdm
 
 def dequantize_tensor(tensor, dtype=None, dequant_dtype=None):
-    data = tensor.data.clone().detach()
+    data = torch.tensor(tensor.data)
     qtype = getattr(tensor, "tensor_type", None)
     oshape = getattr(tensor, "tensor_shape", data.shape)
 
-    if qtype in [None, gguf.GGMLQuantizationType.F32, gguf.GGMLQuantizationType.F16]:
+    if qtype in (None, gguf.GGMLQuantizationType.F32, gguf.GGMLQuantizationType.F16):
         return data.to(dtype)
     elif qtype in dequantize_functions:
         dequant_dtype = dtype if dequant_dtype == "target" else dequant_dtype

@@ -56,6 +56,7 @@ class GGMLLayer(torch.nn.Module):
     """
     This (should) be responsible for de-quantizing on the fly
     """
+    comfy_cast_weights = True
     dequant_dtype = None
     patch_dtype = None
 
@@ -63,6 +64,24 @@ class GGMLLayer(torch.nn.Module):
         super().__init__()
         self.weight = GGMLTensor(1, tensor_type=None, tensor_shape=None)
         self.bias = None
+
+    def _forward_operation(self, x, weight, bias):
+        raise NotImplementedError
+
+    def forward(self, x):
+        # lowvram hack
+        device = None
+        if self.weight.device != x.device:
+            device = self.weight.device
+            self.to(x.device)
+
+        weight, bias = self.get_weights(x.dtype)
+        x = self._forward_operation(x, weight, bias)
+        del weight, bias
+
+        if device:
+            self.to(device)
+        return x
 
     def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):
         for k,v in state_dict.items():
@@ -131,40 +150,17 @@ class GGMLLayer(torch.nn.Module):
         bias = self.get_weight(self.bias, dtype)
         return (weight, bias)
 
-class GGMLOpsLayer(GGMLLayer):
-    comfy_cast_weights = True
-
-    def __init__(self, *args, device=None, dtype=None, **kwargs):
-        super().__init__(device=device, dtype=dtype)
-
-    def _forward_operation(self, x, weight, bias):
-        raise NotImplementedError
-
-    def forward(self, x):
-        # lowvram hack
-        device = None
-        if self.weight.device != x.device:
-            device = self.weight.device
-            self.to(x.device)
-
-        weight, bias = self.get_weights(x.dtype)
-        x = self._forward_operation(x, weight, bias)
-        del weight, bias
-
-        if device:
-            self.to(device)
-        return x
 
 class GGMLOps(comfy.ops.manual_cast):
     """
     Dequantize weights on the fly before doing the compute
     """
-    class Linear(GGMLOpsLayer):
+    class Linear(GGMLLayer):
         _forward_operation = staticmethod(torch.nn.functional.linear)
 
-    class Conv2d(GGMLOpsLayer):
+    class Conv2d(GGMLLayer):
         def __init__(self, *args, device=None, dtype=None, **kwargs):
-            super().__init__(device=device, dtype=dtype)
+            super().__init__()
             _ = kwargs.pop("kernel_size", None)
             self._forward_operation = partial(staticmethod(torch.nn.functional.conv2d), **kwargs)
 
