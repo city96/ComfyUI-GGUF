@@ -1,23 +1,55 @@
 # (c) City96 || Apache-2.0 (apache.org/licenses/LICENSE-2.0)
 import os
-import sys
 import torch
-import numpy as np
 import gguf # This needs to be the llama.cpp one specifically!
 import argparse
 from tqdm import tqdm
 
 from safetensors.torch import load_file
 
+QUANTIZATION_THRESHOLD = 1024
+REARRANGE_THRESHOLD = 512
+MAX_TENSOR_NAME_LENGTH = 127
+
+# Tuple of arch_name, match_lists.
+# Each item in match_lists is a tuple of keys that must match.
+# All keys in a match_lists item must exist for the architecture to match.
+# The architectures are checked in order and the first successful match terminates the search.
+MODEL_DETECTION = (
+    ("flux", (
+        ("transformer_blocks.0.attn.norm_added_k.weight",),
+        ("double_blocks.0.img_attn.proj.weight",),
+    )),
+    ("sd3", (
+        ("transformer_blocks.0.attn.add_q_proj.weight",),
+    )),
+    ("sdxl", (
+        ("down_blocks.0.downsamplers.0.conv.weight", "add_embedding.linear_1.weight",),
+        (
+            "input_blocks.3.0.op.weight", "input_blocks.6.0.op.weight",
+            "output_blocks.2.2.conv.weight", "output_blocks.5.2.conv.weight",
+        ), # Non-diffusers
+        ("label_emb.0.0.weight",),
+    )),
+    ("sd1", (
+        ("down_blocks.0.downsamplers.0.conv.weight",),
+        (
+            "input_blocks.3.0.op.weight", "input_blocks.6.0.op.weight", "input_blocks.9.0.op.weight",
+            "output_blocks.2.1.conv.weight", "output_blocks.5.2.conv.weight", "output_blocks.8.2.conv.weight"
+        ), # Non-diffusers
+    )),
+)
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Generate F16 GGUF files from single UNET")
     parser.add_argument("--src", required=True, help="Source model ckpt file.")
-    parser.add_argument("--dst", help="Output  unet gguf file.")
+    parser.add_argument("--dst", help="Output unet gguf file.")
     args = parser.parse_args()
 
     if not os.path.isfile(args.src):
         parser.error("No input provided!")
-    
+
     return args
 
 def load_state_dict(path):
@@ -26,7 +58,7 @@ def load_state_dict(path):
         state_dict = state_dict.get("model", state_dict)
     else:
         state_dict = load_file(path)
-    
+
     # only keep unet with no prefix!
     sd = {}
     has_prefix = any(["model.diffusion_model." in x for x in state_dict.keys()])
@@ -39,26 +71,21 @@ def load_state_dict(path):
 
     return sd
 
+def detect_arch(state_dict):
+    for arch, match_lists in MODEL_DETECTION:
+        for match_list in match_lists:
+            if all(key in state_dict for key in match_list):
+                return arch
+    breakpoint()
+    raise ValueError("Unknown model architecture!")
+
+
 def load_model(path):
     state_dict = load_state_dict(path)
-
-    # from ComfyUI model detection
-    if "transformer_blocks.0.attn.norm_added_k.weight" in state_dict:
-        arch = "flux"
-        raise ValueError(f"The Diffusers UNET can not be used for this!")
-    elif "double_blocks.0.img_attn.proj.weight" in state_dict:
-        arch = "flux" # mmdit ...?
-    elif "transformer_blocks.0.attn.add_q_proj.weight" in state_dict:
-        arch = "sd3"
-    elif "down_blocks.0.downsamplers.0.conv.weight" in state_dict:
-        if "add_embedding.linear_1.weight" in state_dict:
-            arch = "sdxl"
-        else:
-            arch = "sd1" 
-    else:
-        breakpoint()
-        raise ValueError(f"Unknown model architecture!")
-
+    arch = detect_arch(state_dict)
+    print(f"* Architecture detected from input: {arch}")
+    if arch == "flux" and "transformer_blocks.0.attn.norm_added_k.weight" in state_dict:
+        raise ValueError("The Diffusers UNET can not be used for this!")
     writer = gguf.GGUFWriter(path=None, arch=arch)
     return (writer, state_dict)
 
@@ -66,7 +93,17 @@ def handle_tensors(args, writer, state_dict):
     # TODO list:
     # - do something about this being awful and hacky
 
-    max_name_len = max([len(s) for s in state_dict.keys()]) + 4
+    name_lengths = tuple(sorted(
+        ((key, len(key)) for key in state_dict.keys()),
+        key=lambda item: item[1],
+        reverse=True,
+    ))
+    if not name_lengths:
+        return
+    max_name_len = name_lengths[0][1]
+    if max_name_len > MAX_TENSOR_NAME_LENGTH:
+        bad_list = ", ".join(f"{key!r} ({namelen})" for key, namelen in name_lengths if namelen > MAX_TENSOR_NAME_LENGTH)
+        raise ValueError(f"Can only handle tensor names up to {MAX_TENSOR_NAME_LENGTH} characters. Tensors exceeding the limit: {bad_list}")
     for key, data in tqdm(state_dict.items()):
         old_dtype = data.dtype
 
@@ -88,7 +125,7 @@ def handle_tensors(args, writer, state_dict):
             n_params *= dim_size
 
         # keys to keep as max precision
-        blacklist = [
+        blacklist = {
             "time_embedding.",
             "add_embedding.",
             "time_in.",
@@ -97,36 +134,33 @@ def handle_tensors(args, writer, state_dict):
             "img_in.",
             "guidance_in.",
             "final_layer.",
-        ]
+        }
 
-        if any([x in key for x in blacklist]) and ".weight" in key:
-            data_qtype = gguf.GGMLQuantizationType.F32
+        if old_dtype in (torch.float32, torch.bfloat16):
+            if n_dims == 1:
+                # one-dimensional tensors should be kept in F32
+                # also speeds up inference due to not dequantizing
+                data_qtype = gguf.GGMLQuantizationType.F32
 
-        if n_dims == 1: 
-            # one-dimensional tensors should be kept in F32
-            # also speeds up inference due to not dequantizing
-            data_qtype = gguf.GGMLQuantizationType.F32
-        
-        elif n_params <= 1024:
-            # very small tensors
-            data_qtype = gguf.GGMLQuantizationType.F32
-        
-        elif n_dims == 4:
-            if min(data.shape[:2]) == 4: # output tensor
-                data_qtype = gguf.GGMLQuantizationType.F16
-            elif data_shape[-1] == 3: # 3x3 kernel
-                data_qtype = gguf.GGMLQuantizationType.F16
-            elif data_shape[-1] == 1: # 1x1 kernel
-                #data = np.squeeze(data) # don't do this
-                data_qtype = gguf.GGMLQuantizationType.F16
+            elif n_params <= QUANTIZATION_THRESHOLD:
+                # very small tensors
+                data_qtype = gguf.GGMLQuantizationType.F32
+
+            elif ".weight" in key and any(x in key for x in blacklist):
+                data_qtype = gguf.GGMLQuantizationType.F32
+
+        if (    n_dims > 1                              # Skip one-dimensional tensors
+            and n_params >= REARRANGE_THRESHOLD         # Only rearrange tensors meeting the size requirement
+            and (n_params / 256).is_integer()           # Rearranging only makes sense if total elements is divisible by 256
+            and not (data.shape[-1] / 256).is_integer() # Only need to rearrange if the last dimension is not divisible by 256
+        ):
+            orig_shape = data.shape
+            data = data.reshape(n_params // 256, 256)
+            writer.add_array(f"comfy.gguf.orig_shape.{key}", tuple(int(dim) for dim in orig_shape))
 
         try:
             data = gguf.quants.quantize(data, data_qtype)
-        except gguf.QuantError as e:
-            tqdm.write(f"falling back to F16: {e}")
-            data_qtype = gguf.GGMLQuantizationType.F16
-            data = gguf.quants.quantize(data, data_qtype)
-        except AttributeError as e:
+        except (AttributeError, gguf.QuantError) as e:
             tqdm.write(f"falling back to F16: {e}")
             data_qtype = gguf.GGMLQuantizationType.F16
             data = gguf.quants.quantize(data, data_qtype)
@@ -134,7 +168,7 @@ def handle_tensors(args, writer, state_dict):
         new_name = key # do we need to rename?
 
         shape_str = f"{{{', '.join(str(n) for n in reversed(data.shape))}}}"
-        tqdm.write(f"{f'%-{max_name_len}s' % f'{new_name}'} {old_dtype} --> {data_qtype.name}, shape = {shape_str}")
+        tqdm.write(f"{f'%-{max_name_len + 4}s' % f'{new_name}'} {old_dtype} --> {data_qtype.name}, shape = {shape_str}")
 
         writer.add_tensor(new_name, data, raw_dtype=data_qtype)
 
@@ -150,7 +184,7 @@ if __name__ == "__main__":
     else:
         out_path = f"{os.path.splitext(path)[0]}-F16.gguf"
         writer.add_file_type(gguf.LlamaFileType.MOSTLY_F16)
-    
+
     out_path = args.dst or out_path
     if os.path.isfile(out_path):
         input("Output exists enter to continue or ctrl+c to abort!")

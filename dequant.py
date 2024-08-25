@@ -6,9 +6,9 @@ from tqdm import tqdm
 def dequantize_tensor(tensor, dtype=None, dequant_dtype=None):
     data = torch.tensor(tensor.data)
     qtype = getattr(tensor, "tensor_type", None)
-    oshape = getattr(tensor, "tensor_shape", tensor.data.shape)
+    oshape = getattr(tensor, "tensor_shape", data.shape)
 
-    if qtype in [None, gguf.GGMLQuantizationType.F32, gguf.GGMLQuantizationType.F16]:
+    if qtype in (None, gguf.GGMLQuantizationType.F32, gguf.GGMLQuantizationType.F16):
         return data.to(dtype)
     elif qtype in dequantize_functions:
         dequant_dtype = dtype if dequant_dtype == "target" else dequant_dtype
@@ -37,7 +37,7 @@ def dequantize(data, qtype, oshape, dtype=None):
 
 def to_uint32(x):
     # no uint32 :(
-    x = x.view(torch.uint8).to(torch.int32) 
+    x = x.view(torch.uint8).to(torch.int32)
     return (x[:, 0] | x[:, 1] << 8 | x[:, 2] << 16 | x[:, 3] << 24).unsqueeze(1)
 
 def split_block_dims(blocks, *args):

@@ -24,7 +24,7 @@ index 5ab65ea9..35580d9d 100644
 +    LLM_ARCH_SDXL,
      LLM_ARCH_UNKNOWN,
  };
- 
+
 @@ -259,6 +262,9 @@ static const std::map<llm_arch, const char *> LLM_ARCH_NAMES = {
      { LLM_ARCH_JAIS,            "jais"         },
      { LLM_ARCH_NEMOTRON,        "nemotron"     },
@@ -34,7 +34,7 @@ index 5ab65ea9..35580d9d 100644
 +    { LLM_ARCH_SDXL,            "sdxl"         },
      { LLM_ARCH_UNKNOWN,         "(unknown)"    },
  };
- 
+
 @@ -1337,6 +1343,9 @@ static const std::map<llm_arch, std::map<llm_tensor, std::string>> LLM_TENSOR_NA
              { LLM_TENSOR_FFN_UP,          "blk.%d.ffn_up" },
          },
@@ -48,7 +48,7 @@ index 5ab65ea9..35580d9d 100644
 @@ -4629,6 +4638,12 @@ static void llm_load_hparams(
      // get general kv
      ml.get_key(LLM_KV_GENERAL_NAME, model.name, false);
- 
+
 +    // Disable LLM metadata for image models
 +    if (model.arch == LLM_ARCH_FLUX || model.arch == LLM_ARCH_SD1 || model.arch == LLM_ARCH_SDXL) {
 +        model.ftype = ml.ftype;
@@ -57,11 +57,11 @@ index 5ab65ea9..35580d9d 100644
 +
      // get hparams kv
      ml.get_key(LLM_KV_VOCAB_SIZE, hparams.n_vocab, false) || ml.get_arr_n(LLM_KV_TOKENIZER_LIST, hparams.n_vocab);
- 
+
 @@ -15827,11 +15842,162 @@ static void llama_tensor_dequantize_internal(
      workers.clear();
  }
- 
+
 +static ggml_type img_tensor_get_type(quantize_state_internal & qs, ggml_type new_type, const ggml_tensor * tensor, llama_ftype ftype) {
 +    // Special function for quantizing image model tensors
 +    const std::string name = ggml_get_name(tensor);
@@ -214,10 +214,10 @@ index 5ab65ea9..35580d9d 100644
 +
  static ggml_type llama_tensor_get_type(quantize_state_internal & qs, ggml_type new_type, const ggml_tensor * tensor, llama_ftype ftype) {
      const std::string name = ggml_get_name(tensor);
- 
+
      // TODO: avoid hardcoded tensor names - use the TN_* constants
      const llm_arch arch = qs.model.arch;
 +    if (arch == LLM_ARCH_FLUX || arch == LLM_ARCH_SD1 || arch == LLM_ARCH_SDXL) { return img_tensor_get_type(qs, new_type, tensor, ftype); };
      const auto       tn = LLM_TN(arch);
- 
+
      auto use_more_bits = [](int i_layer, int n_layers) -> bool {
