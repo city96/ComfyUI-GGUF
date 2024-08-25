@@ -1,7 +1,5 @@
 # (c) City96 || Apache-2.0 (apache.org/licenses/LICENSE-2.0)
-import gguf
 import torch
-import numpy as np
 
 import comfy.ops
 from .dequant import dequantize_tensor
@@ -39,16 +37,27 @@ class GGMLTensor(torch.Tensor):
         except Exception as e:
             print(f"ignoring 'copy_' on tensor")
 
+    def __deepcopy__(self, *args, **kwargs):
+        # Intel Arc fix, ref#50
+        new = super().__deepcopy__(*args, **kwargs)
+        new.tensor_type = getattr(self, "tensor_type", None)
+        new.tensor_shape = getattr(self, "tensor_shape", new.data.shape)
+        new.patches = getattr(self, "patches", []).copy()
+        return new
+
     @property
     def shape(self):
         if not hasattr(self, "tensor_shape"):
-            self.tensor_shape = self.size() 
+            self.tensor_shape = self.size()
         return self.tensor_shape
 
 class GGMLLayer(torch.nn.Module):
     """
     This (should) be responsible for de-quantizing on the fly
     """
+    dequant_dtype = None
+    patch_dtype = None
+
     def __init__(self, *args, **kwargs):
         super().__init__()
         self.weight = GGMLTensor(1, tensor_type=None, tensor_shape=None)
@@ -92,16 +101,6 @@ class GGMLLayer(torch.nn.Module):
         super()._apply(fn)
         return self
 
-    def move_patch_to_cuda(self, item, device):
-        if isinstance(item, torch.Tensor):
-            return item.to(device, non_blocking=True)
-        elif isinstance(item, tuple):
-            return tuple(self.move_patch_to_cuda(x, device) for x in item)
-        elif isinstance(item, list):
-            return [self.move_patch_to_cuda(x, device) for x in item]
-        else:
-            return item
-
     def get_weight(self, tensor, dtype):
         if tensor is None:
             return
@@ -110,15 +109,20 @@ class GGMLLayer(torch.nn.Module):
         patch_list = []
         device = tensor.device
         t_move = lambda x: x.to(device) if torch.is_tensor(x) else x
-        for function, patches, _ in getattr(tensor, "patches", []):
-            patch_list += self.move_patch_to_cuda(patches, device)
+        for function, patches, key in getattr(tensor, "patches", []):
+            patch_list += move_patch_to_cuda(patches, device)
 
         # dequantize tensor while patches load
-        weight = dequantize_tensor(tensor, dtype)
+        weight = dequantize_tensor(tensor, dtype, self.dequant_dtype)
 
         # apply patches
         if patch_list:
-            weight = function(patch_list, weight, "dequant.name.unknown")
+            if self.patch_dtype is None:
+                weight = function(patch_list, weight, key)
+            else:
+                # for testing, may degrade image quality
+                patch_dtype = dtype if self.patch_dtype == "target" else self.patch_dtype
+                weight = function(patch_list, weight, key, patch_dtype)
         return weight
 
     def get_weights(self, dtype=torch.float16):
@@ -173,3 +177,13 @@ class GGMLOps(comfy.ops.manual_cast):
             if device:
                 self.to(device)
             return x
+
+def move_patch_to_cuda(item, device):
+    if isinstance(item, torch.Tensor):
+        return item.to(device, non_blocking=True)
+    elif isinstance(item, tuple):
+        return tuple(move_patch_to_cuda(x, device) for x in item)
+    elif isinstance(item, list):
+        return [move_patch_to_cuda(x, device) for x in item]
+    else:
+        return item
