@@ -28,12 +28,9 @@ def gguf_sd_loader_get_orig_shape(reader, tensor_name):
     if field is None:
         return None
     # Has original shape metadata, so we try to decode it.
-    part_idx = field.data[-1]
-    part_type = field.types[0] if len(field.types) == 1 else "INVALID"
-    if part_type != gguf.GGUFValueType.STRING:
-        raise TypeError(f"Bad original shape metadata for {field_key}: Expected STRING, got {part_type}")
-    shape_str = str(field.parts[part_idx], encoding="utf-8")
-    return torch.Size(tuple(int(dim) for dim in shape_str.split(",")))
+    if len(field.types) != 2 or field.types[0] != gguf.GGUFValueType.ARRAY or field.types[1] != gguf.GGUFValueType.INT32:
+        raise TypeError(f"Bad original shape metadata for {field_key}: Expected ARRAY of INT32, got {field.types}")
+    return torch.Size(tuple(int(field.parts[part_idx][0]) for part_idx in field.data))
 
 def gguf_sd_loader(path):
     """

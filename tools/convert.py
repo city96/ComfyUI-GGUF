@@ -156,10 +156,7 @@ def handle_tensors(args, writer, state_dict):
         ):
             orig_shape = data.shape
             data = data.reshape(n_params // 256, 256)
-            writer.add_string(
-                f"comfy.gguf.orig_shape.{key}",
-                ", ".join(str(dim) for dim in orig_shape),
-            )
+            writer.add_array(f"comfy.gguf.orig_shape.{key}", tuple(int(dim) for dim in orig_shape))
 
         try:
             data = gguf.quants.quantize(data, data_qtype)
