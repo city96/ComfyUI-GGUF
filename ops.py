@@ -1,5 +1,6 @@
 # (c) City96 || Apache-2.0 (apache.org/licenses/LICENSE-2.0)
 import torch
+from functools import partial
 
 import comfy.ops
 from .dequant import dequantize_tensor
@@ -14,7 +15,7 @@ class GGMLTensor(torch.Tensor):
         self.tensor_shape = tensor_shape
         self.patches = patches
 
-    def __new__(cls, *args, tensor_type, tensor_shape, tensor_data=None, patches=[], **kwargs):
+    def __new__(cls, *args, tensor_type, tensor_shape, patches=[], **kwargs):
         return super().__new__(cls, *args, **kwargs)
 
     def to(self, *args, **kwargs):
@@ -35,7 +36,7 @@ class GGMLTensor(torch.Tensor):
         try:
             return super().copy_(*args, **kwargs)
         except Exception as e:
-            print(f"ignoring 'copy_' on tensor")
+            print(f"ignoring 'copy_' on tensor: {e}")
 
     def __deepcopy__(self, *args, **kwargs):
         # Intel Arc fix, ref#50
@@ -130,53 +131,43 @@ class GGMLLayer(torch.nn.Module):
         bias = self.get_weight(self.bias, dtype)
         return (weight, bias)
 
+class GGMLOpsLayer(GGMLLayer):
+    comfy_cast_weights = True
+
+    def __init__(self, *args, device=None, dtype=None, **kwargs):
+        super().__init__(device=device, dtype=dtype)
+
+    def _forward_operation(self, x, weight, bias):
+        raise NotImplementedError
+
+    def forward(self, x):
+        # lowvram hack
+        device = None
+        if self.weight.device != x.device:
+            device = self.weight.device
+            self.to(x.device)
+
+        weight, bias = self.get_weights(x.dtype)
+        x = self._forward_operation(x, weight, bias)
+        del weight, bias
+
+        if device:
+            self.to(device)
+        return x
+
 class GGMLOps(comfy.ops.manual_cast):
     """
     Dequantize weights on the fly before doing the compute
     """
-    class Linear(GGMLLayer):
-        comfy_cast_weights = True
+    class Linear(GGMLOpsLayer):
+        _forward_operation = staticmethod(torch.nn.functional.linear)
 
-        def __init__(self, *args, device=None, dtype=None, **kwargs):
-            super().__init__(device=device, dtype=dtype)
-
-        def forward(self, x):
-            # lowvram hack
-            device = None
-            if self.weight.device != x.device:
-                device = self.weight.device
-                self.to(x.device)
-
-            weight, bias = self.get_weights(x.dtype)
-            x = torch.nn.functional.linear(x, weight, bias)
-            del weight, bias
-
-            if device:
-                self.to(device)
-            return x
-
-    class Conv2d(GGMLLayer):
-        comfy_cast_weights = True
-
+    class Conv2d(GGMLOpsLayer):
         def __init__(self, *args, device=None, dtype=None, **kwargs):
             super().__init__(device=device, dtype=dtype)
             _ = kwargs.pop("kernel_size", None)
-            self.kwargs=kwargs
+            self._forward_operation = partial(staticmethod(torch.nn.functional.conv2d), **kwargs)
 
-        def forward(self, x):
-            # lowvram hack
-            device = None
-            if self.weight.device != x.device:
-                device = self.weight.device
-                self.to(x.device)
-
-            weight, bias = self.get_weights(x.dtype)
-            x = torch.nn.functional.conv2d(x, weight, bias, **self.kwargs)
-            del weight, bias
-
-            if device:
-                self.to(device)
-            return x
 
 def move_patch_to_cuda(item, device):
     if isinstance(item, torch.Tensor):

@@ -3,7 +3,6 @@ import torch
 import gguf
 import copy
 import logging
-import numpy as np
 
 import comfy.sd
 import comfy.utils
@@ -40,10 +39,13 @@ def gguf_sd_loader(path):
     for tensor in reader.tensors:
         tensor_name = str(tensor.name)
         shape = tensor_fixup.get(tensor_name)
+        torch_tensor = torch.from_numpy(tensor.data) # mmap
         if shape is None:
             shape = torch.Size(tuple(int(v) for v in reversed(tensor.shape)))
+        elif tensor.tensor_type in {gguf.GGMLQuantizationType.F32, gguf.GGMLQuantizationType.F16}:
+            torch_tensor = torch_tensor.view(*shape)
         sd[tensor_name] = GGMLTensor(
-            torch.from_numpy(tensor.data), # mmap
+            torch_tensor,
             tensor_type = tensor.tensor_type,
             tensor_shape = shape
         )
@@ -106,21 +108,21 @@ class GGUFModelPatcher(comfy.model_patcher.ModelPatcher):
 
         try:
             from comfy.lora import calculate_weight
-        except:
+        except Exception:
             calculate_weight = self.calculate_weight
 
         patches = self.patches[key]
         qtype = getattr(weight, "tensor_type", None)
-        if qtype not in [None, gguf.GGMLQuantizationType.F32, gguf.GGMLQuantizationType.F16]:
+        if qtype not in (None, gguf.GGMLQuantizationType.F32, gguf.GGMLQuantizationType.F16):
             if device_to is not None:
                 out_weight = weight.to(device_to, copy=True)
             else:
                 out_weight = weight.clone()
-            
+
             if self.patch_on_device:
                 patches = move_patch_to_cuda(patches, self.load_device)
             out_weight.patches.append((calculate_weight, patches, key))
-            
+
         else:
             if device_to is not None:
                 temp_weight = comfy.model_management.cast_to_device(weight, device_to, torch.float32, copy=True)
@@ -262,10 +264,10 @@ class CLIPLoaderGGUF:
 
         # for some reason this is just missing in some SAI checkpoints
         if getattr(clip.cond_stage_model, "clip_l", None) is not None:
-            if getattr(clip.cond_stage_model.clip_l.transformer.text_projection.weight, "tensor_shape", None) == None:
+            if getattr(clip.cond_stage_model.clip_l.transformer.text_projection.weight, "tensor_shape", None) is None:
                 clip.cond_stage_model.clip_l.transformer.text_projection = comfy.ops.manual_cast.Linear(768, 768)
         if getattr(clip.cond_stage_model, "clip_g", None) is not None:
-            if getattr(clip.cond_stage_model.clip_g.transformer.text_projection.weight, "tensor_shape", None) == None:
+            if getattr(clip.cond_stage_model.clip_g.transformer.text_projection.weight, "tensor_shape", None) is None:
                 clip.cond_stage_model.clip_g.transformer.text_projection = comfy.ops.manual_cast.Linear(1280, 1280)
 
         return clip
