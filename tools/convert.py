@@ -9,7 +9,7 @@ from safetensors.torch import load_file
 
 QUANTIZATION_THRESHOLD = 1024
 REARRANGE_THRESHOLD = 512
-MAX_TENSOR_NAME_LENGTH = 63
+MAX_TENSOR_NAME_LENGTH = 127
 
 # Tuple of arch_name, match_lists.
 # Each item in match_lists is a tuple of keys that must match.
@@ -104,7 +104,6 @@ def handle_tensors(args, writer, state_dict):
     if max_name_len > MAX_TENSOR_NAME_LENGTH:
         bad_list = ", ".join(f"{key!r} ({namelen})" for key, namelen in name_lengths if namelen > MAX_TENSOR_NAME_LENGTH)
         raise ValueError(f"Can only handle tensor names up to {MAX_TENSOR_NAME_LENGTH} characters. Tensors exceeding the limit: {bad_list}")
-    tensor_fixup = {}
     for key, data in tqdm(state_dict.items()):
         old_dtype = data.dtype
 
@@ -157,7 +156,10 @@ def handle_tensors(args, writer, state_dict):
         ):
             orig_shape = data.shape
             data = data.reshape(n_params // 256, 256)
-            tensor_fixup[key] = orig_shape
+            writer.add_string(
+                f"comfy.gguf.orig_shape.{key}",
+                ", ".join(str(dim) for dim in orig_shape),
+            )
 
         try:
             data = gguf.quants.quantize(data, data_qtype)
@@ -172,12 +174,6 @@ def handle_tensors(args, writer, state_dict):
         tqdm.write(f"{f'%-{max_name_len + 4}s' % f'{new_name}'} {old_dtype} --> {data_qtype.name}, shape = {shape_str}")
 
         writer.add_tensor(new_name, data, raw_dtype=data_qtype)
-
-    if not tensor_fixup:
-        return
-
-    fixup_str = "\n".join(" ".join((k,)+tuple(str(dimval) for dimval in v)) for k,v in tensor_fixup.items())
-    writer.add_string("comfy.gguf.tensor_fixup", fixup_str)
 
 if __name__ == "__main__":
     args = parse_args()

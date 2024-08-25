@@ -22,24 +22,30 @@ if "clip_gguf" not in folder_paths.folder_names_and_paths:
     orig = folder_paths.folder_names_and_paths.get("clip", [[], set()])
     folder_paths.folder_names_and_paths["clip_gguf"] = (orig[0], {".gguf"})
 
+def gguf_sd_loader_get_orig_shape(reader, tensor_name):
+    field_key = f"comfy.gguf.orig_shape.{tensor_name}"
+    field = reader.get_field(field_key)
+    if field is None:
+        return None
+    # Has original shape metadata, so we try to decode it.
+    part_idx = field.data[-1]
+    part_type = field.types[0] if len(field.types) == 1 else "INVALID"
+    if part_type != gguf.GGUFValueType.STRING:
+        raise TypeError(f"Bad original shape metadata for {field_key}: Expected STRING, got {part_type}")
+    shape_str = str(field.parts[part_idx], encoding="utf-8")
+    return torch.Size(tuple(int(dim) for dim in shape_str.split(",")))
+
 def gguf_sd_loader(path):
     """
     Read state dict as fake tensors
     """
     reader = gguf.GGUFReader(path)
-    fixup_field = reader.get_field("comfy.gguf.tensor_fixup")
-    tensor_fixup = {}
-    if fixup_field is not None:
-        tensor_fixup_str=str(fixup_field.parts[fixup_field.data[-1]], encoding="utf-8")
-        for line in str(tensor_fixup_str).split("\n"):
-            key, *fixup_items = line.split(" ")
-            tensor_fixup[key] = torch.Size(tuple(int(i) for i in fixup_items))
     sd = {}
     dt = {}
     for tensor in reader.tensors:
         tensor_name = str(tensor.name)
-        shape = tensor_fixup.get(tensor_name)
         torch_tensor = torch.from_numpy(tensor.data) # mmap
+        shape = gguf_sd_loader_get_orig_shape(reader, tensor_name)
         if shape is None:
             shape = torch.Size(tuple(int(v) for v in reversed(tensor.shape)))
         elif tensor.tensor_type in {gguf.GGMLQuantizationType.F32, gguf.GGMLQuantizationType.F16}:
