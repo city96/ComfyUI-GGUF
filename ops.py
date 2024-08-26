@@ -76,7 +76,7 @@ class GGMLLayer(torch.nn.Module):
             self.to(x.device)
 
         weight, bias = self.get_weights(x.dtype)
-        x = self._forward_operation(x, weight, bias)
+        x = self._forward_operation(x, weight, bias=bias)
         del weight, bias
 
         if device:
