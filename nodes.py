@@ -77,8 +77,7 @@ def gguf_sd_loader(path, handle_prefix="model.diffusion_model.", require_prefix=
         sd[sd_key] = GGMLTensor(
             torch_tensor,
             tensor_type = tensor.tensor_type,
-            tensor_shape = shape,
-            ggml_tensor_name = tensor_name,
+            tensor_shape = shape
         )
         dt[tensor_type_str] = dt.get(tensor_type_str, 0) + 1
 

@@ -9,14 +9,13 @@ class GGMLTensor(torch.Tensor):
     """
     Main tensor-like class for storing quantized weights
     """
-    def __init__(self, *args, tensor_type, tensor_shape, patches=[], ggml_tensor_name=None, **kwargs):
+    def __init__(self, *args, tensor_type, tensor_shape, patches=[], **kwargs):
         super().__init__()
         self.tensor_type = tensor_type
         self.tensor_shape = tensor_shape
         self.patches = patches
-        self.ggml_tensor_name = ggml_tensor_name
 
-    def __new__(cls, *args, tensor_type, tensor_shape, patches=[], ggml_tensor_name=None, **kwargs):
+    def __new__(cls, *args, tensor_type, tensor_shape, patches=[], **kwargs):
         return super().__new__(cls, *args, **kwargs)
 
     def to(self, *args, **kwargs):
@@ -24,7 +23,6 @@ class GGMLTensor(torch.Tensor):
         new.tensor_type = getattr(self, "tensor_type", None)
         new.tensor_shape = getattr(self, "tensor_shape", new.data.shape)
         new.patches = getattr(self, "patches", []).copy()
-        new.ggml_tensor_name = getattr(self, "ggml_tensor_name", None)
         return new
 
     def clone(self, *args, **kwargs):
@@ -46,7 +44,6 @@ class GGMLTensor(torch.Tensor):
         new.tensor_type = getattr(self, "tensor_type", None)
         new.tensor_shape = getattr(self, "tensor_shape", new.data.shape)
         new.patches = getattr(self, "patches", []).copy()
-        new.ggml_tensor_name = getattr(self, "ggml_tensor_name", None)
         return new
 
     @property
