@@ -32,7 +32,7 @@ def gguf_sd_loader_get_orig_shape(reader, tensor_name):
         raise TypeError(f"Bad original shape metadata for {field_key}: Expected ARRAY of INT32, got {field.types}")
     return torch.Size(tuple(int(field.parts[part_idx][0]) for part_idx in field.data))
 
-def gguf_sd_loader(path, handle_prefix="model.diffusion_model.", require_prefix=False):
+def gguf_sd_loader(path, handle_prefix="model.diffusion_model."):
     """
     Read state dict as fake tensors
     """
@@ -54,8 +54,6 @@ def gguf_sd_loader(path, handle_prefix="model.diffusion_model.", require_prefix=
         has_prefix = any(s.startswith(handle_prefix) for s in tensor_names)
     else:
         has_prefix = False
-    if require_prefix and not has_prefix:
-        raise RuntimeError(f"Loader requires prefix {handle_prefix!r} which does not exist in the model")
     for tensor in reader.tensors:
         sd_key = tensor_name = tensor.name
         if has_prefix:
