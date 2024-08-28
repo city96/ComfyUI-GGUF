@@ -140,6 +140,10 @@ class GGUFModelPatcher(comfy.model_patcher.ModelPatcher):
         else:
             comfy.utils.set_attr_param(self.model, key, out_weight)
 
+    def load(self, *args, force_patch_weights=False, **kwargs):
+        # always call `patch_weight_to_device` even for lowvram
+        return super().load(*args, force_patch_weights=True, **kwargs)
+
     def clone(self, *args, **kwargs):
         n = GGUFModelPatcher(self.model, self.load_device, self.offload_device, self.size, weight_inplace_update=self.weight_inplace_update)
         n.patches = {}
