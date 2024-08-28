@@ -32,27 +32,50 @@ def gguf_sd_loader_get_orig_shape(reader, tensor_name):
         raise TypeError(f"Bad original shape metadata for {field_key}: Expected ARRAY of INT32, got {field.types}")
     return torch.Size(tuple(int(field.parts[part_idx][0]) for part_idx in field.data))
 
-def gguf_sd_loader(path):
+def gguf_sd_loader(path, handle_prefix="model.diffusion_model.", require_prefix=False):
     """
     Read state dict as fake tensors
     """
     reader = gguf.GGUFReader(path)
     sd = {}
     dt = {}
+    arch_field = reader.get_field("general.architecture")
+    if arch_field is not None:
+        if len(arch_field.types) != 1 or arch_field.types[0] != gguf.GGUFValueType.STRING:
+            raise TypeError(f"Bad type for GGUF general.architecture key: expected string, got {arch_field.types!r}")
+        arch_str = str(arch_field.parts[arch_field.data[-1]], encoding="utf-8")
+        if arch_str not in {"flux", "sd1", "sdxl"}:
+            raise ValueError(f"Unexpected architecture type in GGUF file, expected one of flux, sd1, sdxl but got {arch_str!r}")
+    else:
+        arch_str = None
+    if handle_prefix is not None:
+        prefix_len = len(handle_prefix)
+        tensor_names = set(tensor.name for tensor in reader.tensors)
+        has_prefix = any(s.startswith(handle_prefix) for s in tensor_names)
+    else:
+        has_prefix = False
+    if require_prefix and not has_prefix:
+        raise RuntimeError(f"Loader requires prefix {handle_prefix!r} which does not exist in the model")
     for tensor in reader.tensors:
-        tensor_name = str(tensor.name)
+        sd_key = tensor_name = tensor.name
+        if has_prefix:
+            if not tensor_name.startswith(handle_prefix):
+                continue
+            sd_key = tensor_name[prefix_len:]
+        tensor_type_str = str(tensor.tensor_type)
         torch_tensor = torch.from_numpy(tensor.data) # mmap
         shape = gguf_sd_loader_get_orig_shape(reader, tensor_name)
         if shape is None:
             shape = torch.Size(tuple(int(v) for v in reversed(tensor.shape)))
-        elif tensor.tensor_type in {gguf.GGMLQuantizationType.F32, gguf.GGMLQuantizationType.F16}:
+        if tensor.tensor_type in {gguf.GGMLQuantizationType.F32, gguf.GGMLQuantizationType.F16}:
             torch_tensor = torch_tensor.view(*shape)
-        sd[tensor_name] = GGMLTensor(
+        sd[sd_key] = GGMLTensor(
             torch_tensor,
             tensor_type = tensor.tensor_type,
-            tensor_shape = shape
+            tensor_shape = shape,
+            ggml_tensor_name = tensor_name,
         )
-        dt[str(tensor.tensor_type)] = dt.get(str(tensor.tensor_type), 0) + 1
+        dt[tensor_type_str] = dt.get(tensor_type_str, 0) + 1
 
     # sanity check debug print
     print("\nggml_sd_loader:")
@@ -172,14 +195,14 @@ class UnetLoaderGGUF:
     def load_unet(self, unet_name, dequant_dtype=None, patch_dtype=None, patch_on_device=None):
         ops = GGMLOps()
 
-        if dequant_dtype in ["default", None]:
+        if dequant_dtype in ("default", None):
             ops.Linear.dequant_dtype = None
         elif dequant_dtype in ["target"]:
             ops.Linear.dequant_dtype = dequant_dtype
         else:
             ops.Linear.dequant_dtype = getattr(torch, dequant_dtype)
 
-        if patch_dtype in ["default", None]:
+        if patch_dtype in ("default", None):
             ops.Linear.patch_dtype = None
         elif patch_dtype in ["target"]:
             ops.Linear.patch_dtype = patch_dtype
@@ -283,11 +306,12 @@ class CLIPLoaderGGUF:
 class DualCLIPLoaderGGUF(CLIPLoaderGGUF):
     @classmethod
     def INPUT_TYPES(s):
+        file_options = (s.get_filename_list(), )
         return {
             "required": {
-                "clip_name1": (s.get_filename_list(), ),
-                "clip_name2": (s.get_filename_list(), ),
-                "type": (["sdxl", "sd3", "flux"], ),
+                "clip_name1": file_options,
+                "clip_name2": file_options,
+                "type": (("sdxl", "sd3", "flux"), ),
             }
         }
 
@@ -296,18 +320,19 @@ class DualCLIPLoaderGGUF(CLIPLoaderGGUF):
     def load_clip(self, clip_name1, clip_name2, type):
         clip_path1 = folder_paths.get_full_path("clip", clip_name1)
         clip_path2 = folder_paths.get_full_path("clip", clip_name2)
-        clip_paths = [clip_path1, clip_path2]
+        clip_paths = (clip_path1, clip_path2)
         clip_type = clip_name_dict.get(type, comfy.sd.CLIPType.STABLE_DIFFUSION)
         return (self.load_patcher(clip_paths, clip_type, self.load_data(clip_paths)),)
 
 class TripleCLIPLoaderGGUF(CLIPLoaderGGUF):
     @classmethod
     def INPUT_TYPES(s):
+        file_options = (s.get_filename_list(), )
         return {
             "required": {
-                "clip_name1": (s.get_filename_list(), ),
-                "clip_name2": (s.get_filename_list(), ),
-                "clip_name3": (s.get_filename_list(), ),
+                "clip_name1": file_options,
+                "clip_name2": file_options,
+                "clip_name3": file_options,
             }
         }
 
@@ -317,7 +342,7 @@ class TripleCLIPLoaderGGUF(CLIPLoaderGGUF):
         clip_path1 = folder_paths.get_full_path("clip", clip_name1)
         clip_path2 = folder_paths.get_full_path("clip", clip_name2)
         clip_path3 = folder_paths.get_full_path("clip", clip_name3)
-        clip_paths = [clip_path1, clip_path2, clip_path3]
+        clip_paths = (clip_path1, clip_path2, clip_path3)
         clip_type = clip_name_dict.get(type, comfy.sd.CLIPType.STABLE_DIFFUSION)
         return (self.load_patcher(clip_paths, clip_type, self.load_data(clip_paths)),)
 

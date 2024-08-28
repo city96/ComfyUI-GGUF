@@ -9,13 +9,14 @@ class GGMLTensor(torch.Tensor):
     """
     Main tensor-like class for storing quantized weights
     """
-    def __init__(self, *args, tensor_type, tensor_shape, patches=[], **kwargs):
+    def __init__(self, *args, tensor_type, tensor_shape, patches=[], ggml_tensor_name=None, **kwargs):
         super().__init__()
         self.tensor_type = tensor_type
         self.tensor_shape = tensor_shape
         self.patches = patches
+        self.ggml_tensor_name = ggml_tensor_name
 
-    def __new__(cls, *args, tensor_type, tensor_shape, patches=[], **kwargs):
+    def __new__(cls, *args, tensor_type, tensor_shape, patches=[], ggml_tensor_name=None, **kwargs):
         return super().__new__(cls, *args, **kwargs)
 
     def to(self, *args, **kwargs):
@@ -23,6 +24,7 @@ class GGMLTensor(torch.Tensor):
         new.tensor_type = getattr(self, "tensor_type", None)
         new.tensor_shape = getattr(self, "tensor_shape", new.data.shape)
         new.patches = getattr(self, "patches", []).copy()
+        new.ggml_tensor_name = getattr(self, "ggml_tensor_name", None)
         return new
 
     def clone(self, *args, **kwargs):
@@ -44,6 +46,7 @@ class GGMLTensor(torch.Tensor):
         new.tensor_type = getattr(self, "tensor_type", None)
         new.tensor_shape = getattr(self, "tensor_shape", new.data.shape)
         new.patches = getattr(self, "patches", []).copy()
+        new.ggml_tensor_name = getattr(self, "ggml_tensor_name", None)
         return new
 
     @property
@@ -76,7 +79,7 @@ class GGMLLayer(torch.nn.Module):
             self.to(x.device)
 
         weight, bias = self.get_weights(x.dtype)
-        x = self._forward_operation(x, weight, bias=bias)
+        x = self._forward_operation(input=x, weight=weight, bias=bias)
         del weight, bias
 
         if device:
@@ -84,10 +87,11 @@ class GGMLLayer(torch.nn.Module):
         return x
 
     def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):
+        prefix_len = len(prefix)
         for k,v in state_dict.items():
-            if k[len(prefix):] == "weight":
+            if k[prefix_len:] == "weight":
                 self.weight = v
-            elif k[len(prefix):] == "bias":
+            elif k[prefix_len:] == "bias":
                 self.bias = v
             else:
                 missing_keys.append(k)
@@ -163,6 +167,28 @@ class GGMLOps(comfy.ops.manual_cast):
             super().__init__()
             _ = kwargs.pop("kernel_size", None)
             self._forward_operation = partial(staticmethod(torch.nn.functional.conv2d), **kwargs)
+
+    class GroupNorm(GGMLLayer):
+        def __init__(self, *args, device=None, dtype=None, **kwargs):
+            super().__init__()
+            num_groups = kwargs.get("num_groups")
+            if num_groups is None:
+                if len(args) == 0 or not isinstance(args[0], int):
+                    raise ValueError("Couldn't get num_groups in GroupNorm: missing or bad type")
+                num_groups = args[0]
+            eps = kwargs.get("eps", 1e-05)
+            self._forward_operation = partial(staticmethod(torch.nn.functional.group_norm), num_groups=num_groups, eps=eps)
+
+    class LayerNorm(GGMLLayer):
+        def __init__(self, *args, device=None, dtype=None, **kwargs):
+            super().__init__()
+            normalized_shape = kwargs.get("normalized_shape")
+            if normalized_shape is None:
+                if len(args) == 0 or not all(isinstance(v, int) for v in args):
+                    raise ValueError("Couldn't get normalized_shape in LayerNorm: missing or bad type")
+                normalized_shape = tuple(args)
+            eps = kwargs.get("eps", 1e-05)
+            self._forward_operation = partial(staticmethod(torch.nn.functional.layer_norm), normalized_shape=normalized_shape, eps=eps)
 
 
 def move_patch_to_cuda(item, device):
