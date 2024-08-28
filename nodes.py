@@ -67,6 +67,11 @@ def gguf_sd_loader(path, handle_prefix="model.diffusion_model.", require_prefix=
         shape = gguf_sd_loader_get_orig_shape(reader, tensor_name)
         if shape is None:
             shape = torch.Size(tuple(int(v) for v in reversed(tensor.shape)))
+            if arch_str is None and (tensor_name.endswith(".proj_in.weight") or tensor_name.endswith(".proj_out.weight")):
+                # Workaround for stable-diffusion.cpp SDXL detection.
+                # Impossible to land here for our own GGUF files as we set architecture.
+                while len(shape) > 2 and shape[-1] == 1:
+                    shape = shape[:-1]
         if tensor.tensor_type in {gguf.GGMLQuantizationType.F32, gguf.GGMLQuantizationType.F16}:
             torch_tensor = torch_tensor.view(*shape)
         sd[sd_key] = GGMLTensor(
