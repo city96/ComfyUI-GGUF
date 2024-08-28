@@ -120,7 +120,7 @@ class GGUFModelPatcher(comfy.model_patcher.ModelPatcher):
             if device_to is not None:
                 out_weight = weight.to(device_to, copy=True)
             else:
-                out_weight = weight.clone()
+                out_weight = weight.to(weight.device, copy=True) # make sure patches are copied
 
             if self.patch_on_device:
                 patches = move_patch_to_cuda(patches, self.load_device)
