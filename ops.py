@@ -121,10 +121,10 @@ class GGMLLayer(torch.nn.Module):
         bias = None
         non_blocking = comfy.model_management.device_supports_non_blocking(device)
         if s.bias is not None:
-            bias = s.get_weight(s.bias.to(device), dtype) if hasattr(s, "get_weight") else s.bias
+            bias = s.get_weight(s.bias.to(device), dtype)
             bias = comfy.ops.cast_to(bias, bias_dtype, device, non_blocking=non_blocking, copy=False)
 
-        weight = s.get_weight(s.weight.to(device), dtype) if hasattr(s, "get_weight") else s.weight
+        weight = s.get_weight(s.weight.to(device), dtype)
         weight = comfy.ops.cast_to(weight, dtype, device, non_blocking=non_blocking, copy=False)
         return weight, bias
 
