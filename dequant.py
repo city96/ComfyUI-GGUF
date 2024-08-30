@@ -45,6 +45,10 @@ def split_block_dims(blocks, *args):
     dims = list(args) + [n_max - sum(args)]
     return torch.split(blocks, dims, dim=1)
 
+# Full weights #
+def dequantize_blocks_BF16(blocks, block_size, type_size, dtype=None):
+    return (blocks.view(torch.int16).to(torch.int32) << 16).view(torch.float32)
+
 # Legacy Quants #
 def dequantize_blocks_Q8_0(blocks, block_size, type_size, dtype=None):
     d, x = split_block_dims(blocks, 2)
@@ -222,6 +226,7 @@ def dequantize_blocks_Q2_K(blocks, block_size, type_size, dtype=None):
     return qs.reshape((n_blocks, -1))
 
 dequantize_functions = {
+    gguf.GGMLQuantizationType.BF16: dequantize_blocks_BF16,
     gguf.GGMLQuantizationType.Q8_0: dequantize_blocks_Q8_0,
     gguf.GGMLQuantizationType.Q5_1: dequantize_blocks_Q5_1,
     gguf.GGMLQuantizationType.Q5_0: dequantize_blocks_Q5_0,
