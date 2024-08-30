@@ -109,7 +109,7 @@ class GGMLLayer(torch.nn.Module):
     def cast_bias_weight(s, input=None, dtype=None, device=None, bias_dtype=None):
         if input is not None:
             if dtype is None:
-                dtype = input.dtype
+                dtype = getattr(input, "dtype", torch.float32)
             if bias_dtype is None:
                 bias_dtype = dtype
             if device is None:
@@ -138,6 +138,16 @@ class GGMLOps(comfy.ops.manual_cast):
         def forward_comfy_cast_weights(self, input):
             weight, bias = self.cast_bias_weight(input)
             return self._conv_forward(input, weight, bias)
+
+    class Embedding(GGMLLayer, comfy.ops.manual_cast.Embedding):
+        def forward_comfy_cast_weights(self, input, out_dtype=None):
+            output_dtype = out_dtype
+            if self.weight.dtype == torch.float16 or self.weight.dtype == torch.bfloat16:
+                out_dtype = None
+            weight, bias = self.cast_bias_weight(self, device=input.device, dtype=out_dtype)
+            return torch.nn.functional.embedding(
+                input, weight, self.padding_idx, self.max_norm, self.norm_type, self.scale_grad_by_freq, self.sparse
+            ).to(dtype=output_dtype)
 
 def move_patch_to_cuda(item, device):
     if isinstance(item, torch.Tensor):
