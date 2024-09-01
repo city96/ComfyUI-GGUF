@@ -59,18 +59,39 @@ class GGMLLayer(torch.nn.Module):
     comfy_cast_weights = True
     dequant_dtype = None
     patch_dtype = None
+    ggml_delegate_types = {None, gguf.GGMLQuantizationType.F32, gguf.GGMLQuantizationType.F16}
 
-    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):
+    def ggml_check_delegate(self, *, weight=None, bias=None):
+        if weight is None:
+            weight = self.weight
+        if bias is None:
+            bias = self.bias
+        weight_type = getattr(weight, "tensor_type", None)
+        bias_type = None if bias is None else getattr(bias, "tensor_type", None)
+        return weight_type in self.ggml_delegate_types and bias_type in self.ggml_delegate_types
+
+    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
+        weight, bias = state_dict.get(f"{prefix}weight"), state_dict.get(f"{prefix}bias")
+        if self.ggml_check_delegate(weight=weight, bias=bias):
+            return super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
+        return self.ggml_load_from_state_dict(state_dict, prefix, *args, **kwargs)
+
+    def _save_to_state_dict(self, *args, **kwargs):
+        if self.ggml_check_delegate():
+            return super()._save_to_state_dict(*args, **kwargs)
+        return self.ggml_save_to_state_dict(*args, **kwargs)
+
+    def ggml_load_from_state_dict(self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):
         prefix_len = len(prefix)
         for k,v in state_dict.items():
-            if k[prefix_len] == "weight":
+            if k[prefix_len:] == "weight":
                 self.weight = torch.nn.Parameter(v, requires_grad=False)
-            elif k[prefix_len] == "bias" and v is not None:
+            elif k[prefix_len:] == "bias" and v is not None:
                 self.bias = torch.nn.Parameter(v, requires_grad=False)
             else:
                 missing_keys.append(k)
 
-    def _save_to_state_dict(self, destination, prefix, keep_vars):
+    def ggml_save_to_state_dict(self, destination, prefix, keep_vars):
         # This is a fake state dict for vram estimation
         weight = torch.zeros_like(self.weight, device=torch.device("meta"))
         destination[prefix + "weight"] = weight
@@ -126,29 +147,49 @@ class GGMLLayer(torch.nn.Module):
         weight = comfy.ops.cast_to(weight, dtype, device, non_blocking=non_blocking, copy=False)
         return weight, bias
 
+    def forward_comfy_cast_weights(self, input, *args, **kwargs):
+        if self.ggml_check_delegate():
+            return super().forward_comfy_cast_weights(input, *args, **kwargs)
+        return self.ggml_forward(input, *args, **kwargs)
+
+    def ggml_forward(self, input):
+        raise NotImplementedError
+
 class GGMLOps(comfy.ops.manual_cast):
     """
     Dequantize weights on the fly before doing the compute
     """
     class Linear(GGMLLayer, comfy.ops.manual_cast.Linear):
-        def forward_comfy_cast_weights(self, input):
+        def ggml_forward(self, input):
             weight, bias = self.cast_bias_weight(input)
             return torch.nn.functional.linear(input, weight, bias)
 
     class Conv2d(GGMLLayer, comfy.ops.manual_cast.Conv2d):
-        def forward_comfy_cast_weights(self, input):
+        def ggml_forward(self, input):
             weight, bias = self.cast_bias_weight(input)
             return self._conv_forward(input, weight, bias)
 
     class Embedding(GGMLLayer, comfy.ops.manual_cast.Embedding):
-        def forward_comfy_cast_weights(self, input, out_dtype=None):
+        def ggml_forward(self, input, out_dtype=None):
             output_dtype = out_dtype
             if self.weight.dtype == torch.float16 or self.weight.dtype == torch.bfloat16:
                 out_dtype = None
-            weight, bias = self.cast_bias_weight(self, device=input.device, dtype=out_dtype)
+            weight, _bias = self.cast_bias_weight(self, device=input.device, dtype=out_dtype)
             return torch.nn.functional.embedding(
                 input, weight, self.padding_idx, self.max_norm, self.norm_type, self.scale_grad_by_freq, self.sparse
             ).to(dtype=output_dtype)
+
+    class LayerNorm(GGMLLayer, comfy.ops.manual_cast.LayerNorm):
+        def ggml_forward(self, input):
+            if self.weight is None:
+                return super().forward_comfy_cast_weights(input)
+            weight, bias = self.cast_bias_weight(input)
+            return torch.nn.functional.layer_norm(input, self.normalized_shape, weight, bias, self.eps)
+
+    class GroupNorm(GGMLLayer, comfy.ops.manual_cast.GroupNorm):
+        def ggml_forward(self, input):
+            weight, bias = self.cast_bias_weight(input)
+            return torch.nn.functional.group_norm(input, self.num_groups, weight, bias, self.eps)
 
 def move_patch_to_cuda(item, device):
     if isinstance(item, torch.Tensor):

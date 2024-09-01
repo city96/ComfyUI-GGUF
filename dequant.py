@@ -11,7 +11,7 @@ def dequantize_tensor(tensor, dtype=None, dequant_dtype=None):
         return tensor.to(dtype)
     elif qtype in dequantize_functions:
         dequant_dtype = dtype if dequant_dtype == "target" else dequant_dtype
-        return dequantize(tensor, qtype, oshape, dtype=dequant_dtype).to(dtype)
+        return dequantize(tensor.data, qtype, oshape, dtype=dequant_dtype).to(dtype)
     else:
         # this is incredibly slow
         tqdm.write(f"Falling back to numpy dequant for qtype: {qtype}")
