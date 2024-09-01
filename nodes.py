@@ -103,10 +103,6 @@ clip_sd_map = {
     "ffn_gate": "layer.1.DenseReluDense.wi_0",
     "ffn_norm": "layer.1.layer_norm",
 }
-# weights that should be dequantized on load
-clip_sd_dequant = {
-    "shared.weight",
-}
 
 def gguf_clip_loader(path):
     raw_sd = gguf_sd_loader(path)
@@ -115,9 +111,6 @@ def gguf_clip_loader(path):
     for k,v in raw_sd.items():
         for s,d in clip_sd_map.items():
             k = k.replace(s,d)
-        if k in clip_sd_dequant:
-            v = dequantize_tensor(v, torch.float32).to(torch.float16)
-            v = GGMLTensor(v, tensor_type=gguf.GGMLQuantizationType.F16, tensor_shape=v.shape)
         sd[k] = v
     return sd
 
