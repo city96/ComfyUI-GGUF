@@ -11,7 +11,7 @@ import comfy.model_patcher
 import folder_paths
 
 from .ops import GGMLTensor, GGMLOps, move_patch_to_cuda
-from .dequant import dequantize_tensor
+from .tools.convert import detect_arch
 
 # Add a custom keys for files ending in .gguf
 if "unet_gguf" not in folder_paths.folder_names_and_paths:
@@ -44,8 +44,8 @@ def gguf_sd_loader(path, handle_prefix="model.diffusion_model."):
         if len(arch_field.types) != 1 or arch_field.types[0] != gguf.GGUFValueType.STRING:
             raise TypeError(f"Bad type for GGUF general.architecture key: expected string, got {arch_field.types!r}")
         arch_str = str(arch_field.parts[arch_field.data[-1]], encoding="utf-8")
-        if arch_str not in {"flux", "sd1", "sdxl"}:
-            raise ValueError(f"Unexpected architecture type in GGUF file, expected one of flux, sd1, sdxl but got {arch_str!r}")
+        if arch_str not in {"flux", "sd1", "sdxl", "t5encoder"}:
+            raise ValueError(f"Unexpected architecture type in GGUF file, expected one of flux, sd1, sdxl, t5encoder but got {arch_str!r}")
     else:
         arch_str = None
     if handle_prefix is not None:
@@ -54,18 +54,24 @@ def gguf_sd_loader(path, handle_prefix="model.diffusion_model."):
         has_prefix = any(s.startswith(handle_prefix) for s in tensor_names)
     else:
         has_prefix = False
+    tensors = []
     for tensor in reader.tensors:
         sd_key = tensor_name = tensor.name
         if has_prefix:
             if not tensor_name.startswith(handle_prefix):
                 continue
             sd_key = tensor_name[prefix_len:]
+        tensors.append((sd_key, tensor))
+    detected_arch = detect_arch(set(val[0] for val in tensors)) if arch_str is None else None
+    for sd_key, tensor in tensors:
+        tensor_name = tensor.name
         tensor_type_str = str(tensor.tensor_type)
         torch_tensor = torch.from_numpy(tensor.data) # mmap
         shape = gguf_sd_loader_get_orig_shape(reader, tensor_name)
         if shape is None:
             shape = torch.Size(tuple(int(v) for v in reversed(tensor.shape)))
-            if arch_str is None and (tensor_name.endswith(".proj_in.weight") or tensor_name.endswith(".proj_out.weight")):
+            if arch_str is None and detected_arch == "sdxl" and \
+                (tensor_name.endswith(".proj_in.weight") or tensor_name.endswith(".proj_out.weight")):
                 # Workaround for stable-diffusion.cpp SDXL detection.
                 # Impossible to land here for our own GGUF files as we set architecture.
                 while len(shape) > 2 and shape[-1] == 1:
