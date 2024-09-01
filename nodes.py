@@ -145,7 +145,7 @@ class GGUFModelPatcher(comfy.model_patcher.ModelPatcher):
             if device_to is not None:
                 out_weight = weight.to(device_to, copy=True)
             else:
-                out_weight = weight.clone()
+                out_weight = weight.to(weight.device, copy=True) # make sure patches are copied
 
             if self.patch_on_device:
                 patches = move_patch_to_cuda(patches, self.load_device)
@@ -164,6 +164,10 @@ class GGUFModelPatcher(comfy.model_patcher.ModelPatcher):
             comfy.utils.copy_to_param(self.model, key, out_weight)
         else:
             comfy.utils.set_attr_param(self.model, key, out_weight)
+
+    def load(self, *args, force_patch_weights=False, **kwargs):
+        # always call `patch_weight_to_device` even for lowvram
+        return super().load(*args, force_patch_weights=True, **kwargs)
 
     def clone(self, *args, **kwargs):
         n = GGUFModelPatcher(self.model, self.load_device, self.offload_device, self.size, weight_inplace_update=self.weight_inplace_update)
