@@ -3,15 +3,24 @@ import gguf
 import torch
 from tqdm import tqdm
 
+
+TORCH_COMPATIBLE_QTYPES = {None, gguf.GGMLQuantizationType.F32, gguf.GGMLQuantizationType.F16}
+
+def is_torch_compatible(tensor):
+    return tensor is None or getattr(tensor, "tensor_type", None) in TORCH_COMPATIBLE_QTYPES
+
+def is_quantized(tensor):
+    return not is_torch_compatible(tensor)
+
 def dequantize_tensor(tensor, dtype=None, dequant_dtype=None):
     qtype = getattr(tensor, "tensor_type", None)
     oshape = getattr(tensor, "tensor_shape", tensor.shape)
 
-    if qtype in (None, gguf.GGMLQuantizationType.F32, gguf.GGMLQuantizationType.F16):
+    if qtype in TORCH_COMPATIBLE_QTYPES:
         return tensor.to(dtype)
     elif qtype in dequantize_functions:
         dequant_dtype = dtype if dequant_dtype == "target" else dequant_dtype
-        return dequantize(tensor, qtype, oshape, dtype=dequant_dtype).to(dtype)
+        return dequantize(tensor.data, qtype, oshape, dtype=dequant_dtype).to(dtype)
     else:
         # this is incredibly slow
         tqdm.write(f"Falling back to numpy dequant for qtype: {qtype}")

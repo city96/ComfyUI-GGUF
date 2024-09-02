@@ -109,6 +109,9 @@ def handle_tensors(args, writer, state_dict):
 
         if data.dtype == torch.bfloat16:
             data = data.to(torch.float32).numpy()
+        # this is so we don't break torch 2.0.X
+        elif data.dtype in [getattr(torch, "float8_e4m3fn", "_invalid"), getattr(torch, "float8_e5m2", "_invalid")]:
+            data = data.to(torch.float16).numpy()
         else:
             data = data.numpy()
 
