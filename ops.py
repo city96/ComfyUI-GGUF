@@ -91,7 +91,7 @@ class GGMLLayer(torch.nn.Module):
         patch_list = []
         device = tensor.device
         for function, patches, key in getattr(tensor, "patches", []):
-            patch_list += move_patch_to_cuda(patches, device)
+            patch_list += move_patch_to_device(patches, device)
 
         # dequantize tensor while patches load
         weight = dequantize_tensor(tensor, dtype, self.dequant_dtype)
@@ -149,12 +149,12 @@ class GGMLOps(comfy.ops.manual_cast):
                 input, weight, self.padding_idx, self.max_norm, self.norm_type, self.scale_grad_by_freq, self.sparse
             ).to(dtype=output_dtype)
 
-def move_patch_to_cuda(item, device):
+def move_patch_to_device(item, device):
     if isinstance(item, torch.Tensor):
         return item.to(device, non_blocking=True)
     elif isinstance(item, tuple):
-        return tuple(move_patch_to_cuda(x, device) for x in item)
+        return tuple(move_patch_to_device(x, device) for x in item)
     elif isinstance(item, list):
-        return [move_patch_to_cuda(x, device) for x in item]
+        return [move_patch_to_device(x, device) for x in item]
     else:
         return item

@@ -10,7 +10,7 @@ import comfy.model_management
 import comfy.model_patcher
 import folder_paths
 
-from .ops import GGMLTensor, GGMLOps, move_patch_to_cuda
+from .ops import GGMLTensor, GGMLOps, move_patch_to_device
 from .dequant import dequantize_tensor
 
 # Add a custom keys for files ending in .gguf
@@ -108,8 +108,7 @@ class GGUFModelPatcher(comfy.model_patcher.ModelPatcher):
         qtype = getattr(weight, "tensor_type", None)
         if qtype not in (None, gguf.GGMLQuantizationType.F32, gguf.GGMLQuantizationType.F16):
             out_weight = weight.to(device_to)
-            if self.patch_on_device:
-                patches = move_patch_to_cuda(patches, self.load_device)
+            patches = move_patch_to_device(patches, self.load_device if self.patch_on_device else self.offload_device)
             out_weight.patches.append((calculate_weight, patches, key))
         else:
             inplace_update = self.weight_inplace_update or inplace_update
