@@ -3,7 +3,7 @@ import gguf
 import torch
 
 import comfy.ops
-from .dequant import dequantize_tensor
+from .dequant import dequantize_tensor, is_quantized
 
 class GGMLTensor(torch.Tensor):
     """
@@ -66,9 +66,7 @@ class GGMLLayer(torch.nn.Module):
             weight = self.weight
         if bias is None:
             bias = self.bias
-        weight_type = getattr(weight, "tensor_type", None)
-        bias_type = None if bias is None else getattr(bias, "tensor_type", None)
-        return any(t not in self.torch_compatible_tensor_types for t in (weight_type, bias_type))
+        return is_quantized(weight) or is_quantized(bias)
 
     def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
         weight, bias = state_dict.get(f"{prefix}weight"), state_dict.get(f"{prefix}bias")
