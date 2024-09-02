@@ -3,6 +3,7 @@ import gguf
 import torch
 
 import comfy.ops
+import comfy.model_management
 from .dequant import dequantize_tensor, is_quantized
 
 class GGMLTensor(torch.Tensor):
@@ -147,10 +148,10 @@ class GGMLLayer(torch.nn.Module):
 
     def forward_comfy_cast_weights(self, input, *args, **kwargs):
         if self.is_ggml_quantized():
-            return self.ggml_forward(input, *args, **kwargs)
+            return self.forward_ggml_cast_weights(input, *args, **kwargs)
         return super().forward_comfy_cast_weights(input, *args, **kwargs)
 
-    def ggml_forward(self, input):
+    def forward_ggml_cast_weights(self, input):
         raise NotImplementedError
 
 class GGMLOps(comfy.ops.manual_cast):
@@ -158,17 +159,17 @@ class GGMLOps(comfy.ops.manual_cast):
     Dequantize weights on the fly before doing the compute
     """
     class Linear(GGMLLayer, comfy.ops.manual_cast.Linear):
-        def ggml_forward(self, input):
+        def forward_ggml_cast_weights(self, input):
             weight, bias = self.cast_bias_weight(input)
             return torch.nn.functional.linear(input, weight, bias)
 
     class Conv2d(GGMLLayer, comfy.ops.manual_cast.Conv2d):
-        def ggml_forward(self, input):
+        def forward_ggml_cast_weights(self, input):
             weight, bias = self.cast_bias_weight(input)
             return self._conv_forward(input, weight, bias)
 
     class Embedding(GGMLLayer, comfy.ops.manual_cast.Embedding):
-        def ggml_forward(self, input, out_dtype=None):
+        def forward_ggml_cast_weights(self, input, out_dtype=None):
             output_dtype = out_dtype
             if self.weight.dtype == torch.float16 or self.weight.dtype == torch.bfloat16:
                 out_dtype = None
@@ -178,14 +179,14 @@ class GGMLOps(comfy.ops.manual_cast):
             ).to(dtype=output_dtype)
 
     class LayerNorm(GGMLLayer, comfy.ops.manual_cast.LayerNorm):
-        def ggml_forward(self, input):
+        def forward_ggml_cast_weights(self, input):
             if self.weight is None:
                 return super().forward_comfy_cast_weights(input)
             weight, bias = self.cast_bias_weight(input)
             return torch.nn.functional.layer_norm(input, self.normalized_shape, weight, bias, self.eps)
 
     class GroupNorm(GGMLLayer, comfy.ops.manual_cast.GroupNorm):
-        def ggml_forward(self, input):
+        def forward_ggml_cast_weights(self, input):
             weight, bias = self.cast_bias_weight(input)
             return torch.nn.functional.group_norm(input, self.num_groups, weight, bias, self.eps)
 
