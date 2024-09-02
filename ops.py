@@ -59,27 +59,27 @@ class GGMLLayer(torch.nn.Module):
     comfy_cast_weights = True
     dequant_dtype = None
     patch_dtype = None
-    ggml_delegate_types = {None, gguf.GGMLQuantizationType.F32, gguf.GGMLQuantizationType.F16}
+    torch_compatible_tensor_types = {None, gguf.GGMLQuantizationType.F32, gguf.GGMLQuantizationType.F16}
 
-    def ggml_check_delegate(self, *, weight=None, bias=None):
+    def is_ggml_quantized(self, *, weight=None, bias=None):
         if weight is None:
             weight = self.weight
         if bias is None:
             bias = self.bias
         weight_type = getattr(weight, "tensor_type", None)
         bias_type = None if bias is None else getattr(bias, "tensor_type", None)
-        return weight_type in self.ggml_delegate_types and bias_type in self.ggml_delegate_types
+        return any(t not in self.torch_compatible_tensor_types for t in (weight_type, bias_type))
 
     def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
         weight, bias = state_dict.get(f"{prefix}weight"), state_dict.get(f"{prefix}bias")
-        if self.ggml_check_delegate(weight=weight, bias=bias):
-            return super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
-        return self.ggml_load_from_state_dict(state_dict, prefix, *args, **kwargs)
+        if self.is_ggml_quantized(weight=weight, bias=bias):
+            return self.ggml_load_from_state_dict(state_dict, prefix, *args, **kwargs)
+        return super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
 
     def _save_to_state_dict(self, *args, **kwargs):
-        if self.ggml_check_delegate():
-            return super()._save_to_state_dict(*args, **kwargs)
-        return self.ggml_save_to_state_dict(*args, **kwargs)
+        if self.is_ggml_quantized():
+            return self.ggml_save_to_state_dict(*args, **kwargs)
+        return super()._save_to_state_dict(*args, **kwargs)
 
     def ggml_load_from_state_dict(self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):
         prefix_len = len(prefix)
@@ -148,9 +148,9 @@ class GGMLLayer(torch.nn.Module):
         return weight, bias
 
     def forward_comfy_cast_weights(self, input, *args, **kwargs):
-        if self.ggml_check_delegate():
-            return super().forward_comfy_cast_weights(input, *args, **kwargs)
-        return self.ggml_forward(input, *args, **kwargs)
+        if self.is_ggml_quantized():
+            return self.ggml_forward(input, *args, **kwargs)
+        return super().forward_comfy_cast_weights(input, *args, **kwargs)
 
     def ggml_forward(self, input):
         raise NotImplementedError
