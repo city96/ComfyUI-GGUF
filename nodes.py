@@ -10,7 +10,7 @@ import comfy.model_management
 import comfy.model_patcher
 import folder_paths
 
-from .ops import GGMLTensor, GGMLOps, move_patch_to_cuda
+from .ops import GGMLTensor, GGMLOps, move_patch_to_device
 from .tools.convert import detect_arch
 
 # Add a custom keys for files ending in .gguf
@@ -129,9 +129,6 @@ class GGUFModelPatcher(comfy.model_patcher.ModelPatcher):
         if key not in self.patches:
             return
         weight = comfy.utils.get_attr(self.model, key)
-        inplace_update = self.weight_inplace_update or inplace_update
-        if key not in self.backup:
-            self.backup[key] = collections.namedtuple('Dimension', ['weight', 'inplace_update'])(weight.to(device=self.offload_device, copy=inplace_update), inplace_update)
 
         try:
             from comfy.lora import calculate_weight
@@ -141,16 +138,16 @@ class GGUFModelPatcher(comfy.model_patcher.ModelPatcher):
         patches = self.patches[key]
         qtype = getattr(weight, "tensor_type", None)
         if qtype not in (None, gguf.GGMLQuantizationType.F32, gguf.GGMLQuantizationType.F16):
-            if device_to is not None:
-                out_weight = weight.to(device_to, copy=True)
-            else:
-                out_weight = weight.to(weight.device, copy=True) # make sure patches are copied
-
-            if self.patch_on_device:
-                patches = move_patch_to_cuda(patches, self.load_device)
+            out_weight = weight.to(device_to)
+            patches = move_patch_to_device(patches, self.load_device if self.patch_on_device else self.offload_device)
             out_weight.patches.append((calculate_weight, patches, key))
-
         else:
+            inplace_update = self.weight_inplace_update or inplace_update
+            if key not in self.backup:
+                self.backup[key] = collections.namedtuple('Dimension', ['weight', 'inplace_update'])(
+                    weight.to(device=self.offload_device, copy=inplace_update), inplace_update
+                )
+
             if device_to is not None:
                 temp_weight = comfy.model_management.cast_to_device(weight, device_to, torch.float32, copy=True)
             else:
@@ -163,6 +160,17 @@ class GGUFModelPatcher(comfy.model_patcher.ModelPatcher):
             comfy.utils.copy_to_param(self.model, key, out_weight)
         else:
             comfy.utils.set_attr_param(self.model, key, out_weight)
+
+    def unpatch_model(self, device_to=None, unpatch_weights=True):
+        if unpatch_weights:
+            for p in self.model.parameters():
+                qtype = getattr(p, "tensor_type", None)
+                patches = getattr(p, "patches", [])
+                if qtype in (None, gguf.GGMLQuantizationType.F32, gguf.GGMLQuantizationType.F16):
+                    continue
+                if len(patches) > 0:
+                    p.patches = []
+        return super().unpatch_model(device_to=None, unpatch_weights=unpatch_weights)
 
     def load(self, *args, force_patch_weights=False, **kwargs):
         # always call `patch_weight_to_device` even for lowvram
