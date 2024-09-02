@@ -12,6 +12,7 @@ import folder_paths
 
 from .ops import GGMLTensor, GGMLOps, move_patch_to_device
 from .tools.convert import detect_arch
+from .dequant import is_quantized, is_torch_compatible
 
 # Add a custom keys for files ending in .gguf
 if "unet_gguf" not in folder_paths.folder_names_and_paths:
@@ -136,8 +137,7 @@ class GGUFModelPatcher(comfy.model_patcher.ModelPatcher):
             calculate_weight = self.calculate_weight
 
         patches = self.patches[key]
-        qtype = getattr(weight, "tensor_type", None)
-        if qtype not in (None, gguf.GGMLQuantizationType.F32, gguf.GGMLQuantizationType.F16):
+        if is_quantized(weight):
             out_weight = weight.to(device_to)
             patches = move_patch_to_device(patches, self.load_device if self.patch_on_device else self.offload_device)
             out_weight.patches.append((calculate_weight, patches, key))
@@ -164,10 +164,9 @@ class GGUFModelPatcher(comfy.model_patcher.ModelPatcher):
     def unpatch_model(self, device_to=None, unpatch_weights=True):
         if unpatch_weights:
             for p in self.model.parameters():
-                qtype = getattr(p, "tensor_type", None)
-                patches = getattr(p, "patches", [])
-                if qtype in (None, gguf.GGMLQuantizationType.F32, gguf.GGMLQuantizationType.F16):
+                if is_torch_compatible(p):
                     continue
+                patches = getattr(p, "patches", [])
                 if len(patches) > 0:
                     p.patches = []
         return super().unpatch_model(device_to=None, unpatch_weights=unpatch_weights)
