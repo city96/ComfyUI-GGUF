@@ -11,7 +11,6 @@ import comfy.model_patcher
 import folder_paths
 
 from .ops import GGMLTensor, GGMLOps, move_patch_to_device
-from .tools.convert import detect_arch
 from .dequant import is_quantized, is_torch_compatible
 
 # Add a custom keys for files ending in .gguf
@@ -38,23 +37,14 @@ def gguf_sd_loader(path, handle_prefix="model.diffusion_model."):
     Read state dict as fake tensors
     """
     reader = gguf.GGUFReader(path)
-    sd = {}
-    dt = {}
-    arch_field = reader.get_field("general.architecture")
-    if arch_field is not None:
-        if len(arch_field.types) != 1 or arch_field.types[0] != gguf.GGUFValueType.STRING:
-            raise TypeError(f"Bad type for GGUF general.architecture key: expected string, got {arch_field.types!r}")
-        arch_str = str(arch_field.parts[arch_field.data[-1]], encoding="utf-8")
-        if arch_str not in {"flux", "sd1", "sdxl", "t5encoder"}:
-            raise ValueError(f"Unexpected architecture type in GGUF file, expected one of flux, sd1, sdxl, t5encoder but got {arch_str!r}")
-    else:
-        arch_str = None
+
+    # filter and strip prefix
+    has_prefix = False
     if handle_prefix is not None:
         prefix_len = len(handle_prefix)
         tensor_names = set(tensor.name for tensor in reader.tensors)
         has_prefix = any(s.startswith(handle_prefix) for s in tensor_names)
-    else:
-        has_prefix = False
+
     tensors = []
     for tensor in reader.tensors:
         sd_key = tensor_name = tensor.name
@@ -63,35 +53,52 @@ def gguf_sd_loader(path, handle_prefix="model.diffusion_model."):
                 continue
             sd_key = tensor_name[prefix_len:]
         tensors.append((sd_key, tensor))
-    detected_arch = detect_arch(set(val[0] for val in tensors)) if arch_str is None else None
+
+    # detect and verify architecture
+    compat = None
+    arch_str = None
+    arch_field = reader.get_field("general.architecture")
+    if arch_field is not None:
+        if len(arch_field.types) != 1 or arch_field.types[0] != gguf.GGUFValueType.STRING:
+            raise TypeError(f"Bad type for GGUF general.architecture key: expected string, got {arch_field.types!r}")
+        arch_str = str(arch_field.parts[arch_field.data[-1]], encoding="utf-8")
+        if arch_str not in {"flux", "sd1", "sdxl", "t5", "t5encoder"}:
+            raise ValueError(f"Unexpected architecture type in GGUF file, expected one of flux, sd1, sdxl, t5encoder but got {arch_str!r}")
+    else: # stable-diffusion.cpp
+        # import here to avoid changes to convert.py breaking regular models
+        from .tools.convert import detect_arch
+        arch_str = detect_arch(set(val[0] for val in tensors))
+        compat = "sd.cpp"
+
+    # main loading loop
+    state_dict = {}
+    qtype_dict = {}
     for sd_key, tensor in tensors:
         tensor_name = tensor.name
         tensor_type_str = str(tensor.tensor_type)
         torch_tensor = torch.from_numpy(tensor.data) # mmap
+
         shape = gguf_sd_loader_get_orig_shape(reader, tensor_name)
         if shape is None:
             shape = torch.Size(tuple(int(v) for v in reversed(tensor.shape)))
-            if arch_str is None and detected_arch == "sdxl" and \
-                (tensor_name.endswith(".proj_in.weight") or tensor_name.endswith(".proj_out.weight")):
-                # Workaround for stable-diffusion.cpp SDXL detection.
-                # Impossible to land here for our own GGUF files as we set architecture.
-                while len(shape) > 2 and shape[-1] == 1:
-                    shape = shape[:-1]
+            # Workaround for stable-diffusion.cpp SDXL detection.
+            if compat == "sd.cpp" and arch_str == "sdxl":
+                if any([tensor_name.endswith(x) for x in (".proj_in.weight", ".proj_out.weight")]):
+                    while len(shape) > 2 and shape[-1] == 1:
+                        shape = shape[:-1]
+
+        # add to state dict
         if tensor.tensor_type in {gguf.GGMLQuantizationType.F32, gguf.GGMLQuantizationType.F16}:
             torch_tensor = torch_tensor.view(*shape)
-        sd[sd_key] = GGMLTensor(
-            torch_tensor,
-            tensor_type = tensor.tensor_type,
-            tensor_shape = shape
-        )
-        dt[tensor_type_str] = dt.get(tensor_type_str, 0) + 1
+        state_dict[sd_key] = GGMLTensor(torch_tensor, tensor_type=tensor.tensor_type, tensor_shape=shape)
+        qtype_dict[tensor_type_str] = qtype_dict.get(tensor_type_str, 0) + 1
 
     # sanity check debug print
     print("\nggml_sd_loader:")
-    for k,v in dt.items():
+    for k,v in qtype_dict.items():
         print(f" {k:30}{v:3}")
-    print("\n")
-    return sd
+
+    return state_dict
 
 # for remapping llama.cpp -> original key names
 clip_sd_map = {
