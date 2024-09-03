@@ -177,7 +177,6 @@ class GGUFModelPatcher(comfy.model_patcher.ModelPatcher):
                 if len(patches) > 0:
                     p.patches = []
         # TODO: Find another way to not unload after patches
-        device_to = device_to if comfy.model_management.DISABLE_SMART_MEMORY else None
         return super().unpatch_model(device_to=device_to, unpatch_weights=unpatch_weights)
 
     mmap_released = False
