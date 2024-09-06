@@ -147,9 +147,8 @@ class GGUFModelPatcher(comfy.model_patcher.ModelPatcher):
         if is_quantized(weight):
             out_weight = weight.to(device_to)
             patches = move_patch_to_device(patches, self.load_device if self.patch_on_device else self.offload_device)
-            patch = (calculate_weight, patches, key)
-            if patch not in out_weight.patches:
-                out_weight.patches.append(patch)
+            # TODO: do we ever have legitimate duplicate patches? (i.e. patch on top of patched weight)
+            out_weight.patches = [(calculate_weight, patches, key)]
         else:
             inplace_update = self.weight_inplace_update or inplace_update
             if key not in self.backup:
