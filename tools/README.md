@@ -12,7 +12,7 @@ python convert.py --src E:\models\unet\flux1-dev.safetensors
 ```
 
 
-To quantize the model, first apply the provided patch to the llama.cpp repo you've just cloned.
+To quantize the model, first apply the provided patch to the llama.cpp repo you've just cloned. If you get a "corrupt patch" error, you may have to [change the line endings in the patch file](https://github.com/city96/ComfyUI-GGUF/issues/90#issuecomment-2323011648).
 ```
 cd llama.cpp
 git checkout tags/b3600
@@ -20,7 +20,7 @@ git apply ..\lcpp.patch
 ```
 
 
-The compile the llama-quantize binary. This example uses cmake, on linux you can just use make.
+Then, compile the llama-quantize binary. This example uses cmake, on linux you can just use make.
 ```
 mkdir build
 cd build
