@@ -71,14 +71,10 @@ class GGMLLayer(torch.nn.Module):
 
     def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
         weight, bias = state_dict.get(f"{prefix}weight"), state_dict.get(f"{prefix}bias")
-        if self.is_ggml_quantized(weight=weight, bias=bias):
+        # NOTE: using modified load for linear due to not initializing on creation, see GGMLOps todo 
+        if self.is_ggml_quantized(weight=weight, bias=bias) or isinstance(self, torch.nn.Linear):
             return self.ggml_load_from_state_dict(state_dict, prefix, *args, **kwargs)
         return super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
-
-    def _save_to_state_dict(self, *args, **kwargs):
-        if self.is_ggml_quantized():
-            return self.ggml_save_to_state_dict(*args, **kwargs)
-        return super()._save_to_state_dict(*args, **kwargs)
 
     def ggml_load_from_state_dict(self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):
         prefix_len = len(prefix)
@@ -89,6 +85,11 @@ class GGMLLayer(torch.nn.Module):
                 self.bias = torch.nn.Parameter(v, requires_grad=False)
             else:
                 missing_keys.append(k)
+
+    def _save_to_state_dict(self, *args, **kwargs):
+        if self.is_ggml_quantized():
+            return self.ggml_save_to_state_dict(*args, **kwargs)
+        return super()._save_to_state_dict(*args, **kwargs)
 
     def ggml_save_to_state_dict(self, destination, prefix, keep_vars):
         # This is a fake state dict for vram estimation
@@ -159,6 +160,16 @@ class GGMLOps(comfy.ops.manual_cast):
     Dequantize weights on the fly before doing the compute
     """
     class Linear(GGMLLayer, comfy.ops.manual_cast.Linear):
+        def __init__(self, in_features, out_features, bias=True, device=None, dtype=None):
+            torch.nn.Module.__init__(self)
+            # TODO: better workaround for reserved memory spike on windows
+            # Issue is with `torch.empty` still reserving the full memory for the layer
+            # Windows doesn't over-commit memory so without this 24GB+ of pagefile is used
+            self.in_features = in_features
+            self.out_features = out_features
+            self.weight = None
+            self.bias = None
+
         def forward_ggml_cast_weights(self, input):
             weight, bias = self.cast_bias_weight(input)
             return torch.nn.functional.linear(input, weight, bias)
