@@ -327,7 +327,10 @@ class CLIPLoaderGGUF:
         clip = comfy.sd.load_text_encoder_state_dicts(
             clip_type = clip_type,
             state_dicts = clip_data,
-            model_options = {"custom_operations": GGMLOps},
+            model_options = {
+                "custom_operations": GGMLOps,
+                "initial_device": comfy.model_management.text_encoder_offload_device()
+            },
             embedding_directory = folder_paths.get_folder_paths("embeddings"),
         )
         clip.patcher = GGUFModelPatcher.clone(clip.patcher)
