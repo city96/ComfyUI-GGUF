@@ -67,7 +67,7 @@ def gguf_sd_loader(path, handle_prefix="model.diffusion_model."):
     else: # stable-diffusion.cpp
         # import here to avoid changes to convert.py breaking regular models
         from .tools.convert import detect_arch
-        arch_str = detect_arch(set(val[0] for val in tensors))
+        arch_str = detect_arch(set(val[0] for val in tensors)).arch
         compat = "sd.cpp"
 
     # main loading loop

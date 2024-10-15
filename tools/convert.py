@@ -11,35 +11,74 @@ QUANTIZATION_THRESHOLD = 1024
 REARRANGE_THRESHOLD = 512
 MAX_TENSOR_NAME_LENGTH = 127
 
-# Tuple of arch_name, match_lists.
-# Each item in match_lists is a tuple of keys that must match.
-# All keys in a match_lists item must exist for the architecture to match.
-# The architectures are checked in order and the first successful match terminates the search.
-MODEL_DETECTION = (
-    ("flux", (
+class ModelTemplate:
+    arch = "invalid"  # string describing architecture
+    shape_fix = False # whether to reshape tensors
+    keys_detect = []  # list of lists to match in state dict
+    keys_banned = []  # list of keys that should mark model as invalid for conversion
+
+class ModelFlux(ModelTemplate):
+    arch = "flux"
+    keys_detect = [
         ("transformer_blocks.0.attn.norm_added_k.weight",),
         ("double_blocks.0.img_attn.proj.weight",),
-    )),
-    ("sd3", (
+    ]
+    keys_banned = ["transformer_blocks.0.attn.norm_added_k.weight",]
+
+class ModelSD3(ModelTemplate):
+    arch = "sd3"
+    keys_detect = [
         ("transformer_blocks.0.attn.add_q_proj.weight",),
-    )),
-    ("sdxl", (
+        ("joint_blocks.0.x_block.attn.qkv.weight",),
+    ]
+    keys_banned = ["transformer_blocks.0.attn.add_q_proj.weight",]
+
+class ModelSDXL(ModelTemplate):
+    arch = "sdxl"
+    shape_fix = True
+    keys_detect = [
         ("down_blocks.0.downsamplers.0.conv.weight", "add_embedding.linear_1.weight",),
         (
             "input_blocks.3.0.op.weight", "input_blocks.6.0.op.weight",
             "output_blocks.2.2.conv.weight", "output_blocks.5.2.conv.weight",
         ), # Non-diffusers
         ("label_emb.0.0.weight",),
-    )),
-    ("sd1", (
+    ]
+
+class ModelSD1(ModelTemplate):
+    arch = "sd1"
+    shape_fix = False
+    keys_detect = [
         ("down_blocks.0.downsamplers.0.conv.weight",),
         (
             "input_blocks.3.0.op.weight", "input_blocks.6.0.op.weight", "input_blocks.9.0.op.weight",
             "output_blocks.2.1.conv.weight", "output_blocks.5.2.conv.weight", "output_blocks.8.2.conv.weight"
         ), # Non-diffusers
-    )),
-)
+    ]
 
+# The architectures are checked in order and the first successful match terminates the search.
+arch_list = [ModelFlux, ModelSD3, ModelSDXL, ModelSD1]
+
+def is_model_arch(model, state_dict):
+    # check if model is correct
+    matched = False
+    invalid = False
+    for match_list in model.keys_detect:
+        if all(key in state_dict for key in match_list):
+            matched = True
+            invalid = any(key in state_dict for key in model.keys_banned)
+            break
+    assert not invalid, "Model architecture not allowed for conversion! (i.e. reference VS diffusers format)"
+    return matched
+
+def detect_arch(state_dict):
+    model_arch = None
+    for arch in arch_list:
+        if is_model_arch(arch, state_dict):
+            model_arch = arch
+            break
+    assert model_arch is not None, "Unknown model architecture!"
+    return model_arch
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Generate F16 GGUF files from single UNET")
@@ -71,28 +110,14 @@ def load_state_dict(path):
 
     return sd
 
-def detect_arch(state_dict):
-    for arch, match_lists in MODEL_DETECTION:
-        for match_list in match_lists:
-            if all(key in state_dict for key in match_list):
-                return arch
-    breakpoint()
-    raise ValueError("Unknown model architecture!")
-
-
 def load_model(path):
     state_dict = load_state_dict(path)
-    arch = detect_arch(state_dict)
-    print(f"* Architecture detected from input: {arch}")
-    if arch == "flux" and "transformer_blocks.0.attn.norm_added_k.weight" in state_dict:
-        raise ValueError("The Diffusers UNET can not be used for this!")
-    writer = gguf.GGUFWriter(path=None, arch=arch)
-    return (writer, state_dict)
+    model_arch = detect_arch(state_dict)
+    print(f"* Architecture detected from input: {model_arch.arch}")
+    writer = gguf.GGUFWriter(path=None, arch=model_arch.arch)
+    return (writer, state_dict, model_arch)
 
-def handle_tensors(args, writer, state_dict):
-    # TODO list:
-    # - do something about this being awful and hacky
-
+def handle_tensors(args, writer, state_dict, model_arch):
     name_lengths = tuple(sorted(
         ((key, len(key)) for key in state_dict.keys()),
         key=lambda item: item[1],
@@ -152,7 +177,8 @@ def handle_tensors(args, writer, state_dict):
             elif ".weight" in key and any(x in key for x in blacklist):
                 data_qtype = gguf.GGMLQuantizationType.F32
 
-        if (    n_dims > 1                              # Skip one-dimensional tensors
+        if (model_arch.shape_fix                        # NEVER reshape for models such as flux
+            and n_dims > 1                              # Skip one-dimensional tensors
             and n_params >= REARRANGE_THRESHOLD         # Only rearrange tensors meeting the size requirement
             and (n_params / 256).is_integer()           # Rearranging only makes sense if total elements is divisible by 256
             and not (data.shape[-1] / 256).is_integer() # Only need to rearrange if the last dimension is not divisible by 256
@@ -178,7 +204,7 @@ def handle_tensors(args, writer, state_dict):
 if __name__ == "__main__":
     args = parse_args()
     path = args.src
-    writer, state_dict = load_model(path)
+    writer, state_dict, model_arch = load_model(path)
 
     writer.add_quantization_version(gguf.GGML_QUANT_VERSION)
     if next(iter(state_dict.values())).dtype == torch.bfloat16:
@@ -192,7 +218,7 @@ if __name__ == "__main__":
     if os.path.isfile(out_path):
         input("Output exists enter to continue or ctrl+c to abort!")
 
-    handle_tensors(path, writer, state_dict)
+    handle_tensors(path, writer, state_dict, model_arch)
     writer.write_header_to_file(path=out_path)
     writer.write_kv_data_to_file()
     writer.write_tensors_to_file(progress=True)
