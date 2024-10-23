@@ -1,5 +1,5 @@
 diff --git a/ggml/include/ggml.h b/ggml/include/ggml.h
-index de3c706f..96bcab79 100644
+index de3c706f..0267c1fa 100644
 --- a/ggml/include/ggml.h
 +++ b/ggml/include/ggml.h
 @@ -223,7 +223,7 @@
@@ -15,19 +15,19 @@ index de3c706f..96bcab79 100644
  
      // manage tensor info
      GGML_API void gguf_add_tensor(struct gguf_context * ctx, const struct ggml_tensor * tensor);
-+    GGML_API void gguf_set_tensor_ndim(struct gguf_context * ctx, const char * name, uint32_t n_dim);
++    GGML_API void gguf_set_tensor_ndim(struct gguf_context * ctx, const char * name, int n_dim);
      GGML_API void gguf_set_tensor_type(struct gguf_context * ctx, const char * name, enum ggml_type type);
      GGML_API void gguf_set_tensor_data(struct gguf_context * ctx, const char * name, const void * data, size_t size);
  
 diff --git a/ggml/src/ggml.c b/ggml/src/ggml.c
-index b16c462f..987cdcc2 100644
+index b16c462f..6d1568f1 100644
 --- a/ggml/src/ggml.c
 +++ b/ggml/src/ggml.c
 @@ -22960,6 +22960,14 @@ void gguf_add_tensor(
      ctx->header.n_tensors++;
  }
  
-+void gguf_set_tensor_ndim(struct gguf_context * ctx, const char * name, const uint32_t n_dim) {
++void gguf_set_tensor_ndim(struct gguf_context * ctx, const char * name, const int n_dim) {
 +    const int idx = gguf_find_tensor(ctx, name);
 +    if (idx < 0) {
 +        GGML_ABORT("tensor not found");
@@ -39,7 +39,7 @@ index b16c462f..987cdcc2 100644
      const int idx = gguf_find_tensor(ctx, name);
      if (idx < 0) {
 diff --git a/src/llama.cpp b/src/llama.cpp
-index 24e1f1f0..e7747711 100644
+index 24e1f1f0..a54fd6a2 100644
 --- a/src/llama.cpp
 +++ b/src/llama.cpp
 @@ -205,6 +205,10 @@ enum llm_arch {
@@ -211,7 +211,23 @@ index 24e1f1f0..e7747711 100644
  static ggml_type llama_tensor_get_type(quantize_state_internal & qs, ggml_type new_type, const ggml_tensor * tensor, llama_ftype ftype) {
      const std::string name = ggml_get_name(tensor);
  
-@@ -18647,6 +18781,50 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
+@@ -18547,6 +18681,15 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
+             ctx_outs[i_split] = gguf_init_empty();
+         }
+         gguf_add_tensor(ctx_outs[i_split], tensor);
++        // SD3 pos_embed needs special fix as first dim is 1, which gets truncated here
++        if (model.arch == LLM_ARCH_SD3) {
++            const std::string name = ggml_get_name(tensor);
++            if (name == "pos_embed" && tensor->ne[2] == 1) {
++                const int n_dim = 3;
++                gguf_set_tensor_ndim(ctx_outs[i_split], "pos_embed", n_dim);
++                LLAMA_LOG_INFO("\n%s: Correcting pos_embed shape for SD3: [key:%s]\n", __func__, tensor->name);
++            }
++        }
+     }
+ 
+     // Set split info if needed
+@@ -18647,6 +18790,45 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
          // do not quantize relative position bias (T5)
          quantize &= name.find("attn_rel_b.weight") == std::string::npos;
  
@@ -248,11 +264,6 @@ index 24e1f1f0..e7747711 100644
 +            quantize &= name.find("x_embedder.") == std::string::npos;
 +            quantize &= name != "proj_out.weight";
 +            quantize &= name != "pos_embed";
-+            // SD3 pos_embed needs special fix as first dim is 1, which gets truncated here
-+            if (name == "pos_embed" && tensor->ne[2] == 1) {
-+                const uint32_t n_dim = 3;
-+                gguf_set_tensor_ndim(ctx_outs[cur_split], "pos_embed", n_dim);
-+            }
 +        }
 +        // ignore 3D/4D tensors for image models as the code was never meant to handle these
 +        if (image_model) {
@@ -262,7 +273,7 @@ index 24e1f1f0..e7747711 100644
          enum ggml_type new_type;
          void * new_data;
          size_t new_size;
-@@ -18655,6 +18833,9 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
+@@ -18655,6 +18837,9 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
              new_type = default_type;
  
              // get more optimal quantization type based on the tensor shape, layer, etc.
@@ -272,7 +283,7 @@ index 24e1f1f0..e7747711 100644
              if (!params->pure && ggml_is_quantized(default_type)) {
                  new_type = llama_tensor_get_type(qs, new_type, tensor, ftype);
              }
-@@ -18664,6 +18845,7 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
+@@ -18664,6 +18849,7 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
              if (params->output_tensor_type < GGML_TYPE_COUNT && strcmp(tensor->name, "output.weight") == 0) {
                  new_type = params->output_tensor_type;
              }
