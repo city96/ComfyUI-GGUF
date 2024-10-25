@@ -1,10 +1,8 @@
-This needs the llama.cpp version of gguf-py to work at the moment, not the pip one as that one does not have the python quantization code yet.
-
+# Quantizing Models
 ```
+pip install gguf
 git clone https://github.com/ggerganov/llama.cpp
-pip install llama.cpp/gguf-py
 ```
-
 
 To convert your initial source model to FP16 (or BF16), run the following command:
 ```
