@@ -19,7 +19,7 @@ if "unet_gguf" not in folder_paths.folder_names_and_paths:
     folder_paths.folder_names_and_paths["unet_gguf"] = (orig[0], {".gguf"})
 
 if "clip_gguf" not in folder_paths.folder_names_and_paths:
-    orig = folder_paths.folder_names_and_paths.get("clip", [[], set()])
+    orig = folder_paths.folder_names_and_paths.get("text_encoders", folder_paths.folder_names_and_paths.get("clip", [[], set()]))
     folder_paths.folder_names_and_paths["clip_gguf"] = (orig[0], {".gguf"})
 
 def gguf_sd_loader_get_orig_shape(reader, tensor_name):
