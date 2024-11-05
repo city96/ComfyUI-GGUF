@@ -295,7 +295,7 @@ class CLIPLoaderGGUF:
         return {
             "required": {
                 "clip_name": (s.get_filename_list(),),
-                "type": (["stable_diffusion", "stable_cascade", "sd3", "stable_audio"],),
+                "type": (["stable_diffusion", "stable_cascade", "sd3", "stable_audio", "mochi"],),
             }
         }
 
