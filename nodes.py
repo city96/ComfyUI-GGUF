@@ -287,6 +287,7 @@ clip_name_dict = {
     "sdxl": comfy.sd.CLIPType.STABLE_DIFFUSION,
     "sd3": comfy.sd.CLIPType.SD3,
     "flux": comfy.sd.CLIPType.FLUX,
+    "mochi": getattr(comfy.sd.CLIPType, "MOCHI", None),
 }
 
 class CLIPLoaderGGUF:
@@ -295,7 +296,7 @@ class CLIPLoaderGGUF:
         return {
             "required": {
                 "clip_name": (s.get_filename_list(),),
-                "type": (["stable_diffusion", "stable_cascade", "sd3", "stable_audio"],),
+                "type": (["stable_diffusion", "stable_cascade", "sd3", "stable_audio", "mochi"],),
             }
         }
 
