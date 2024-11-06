@@ -287,6 +287,7 @@ clip_name_dict = {
     "sdxl": comfy.sd.CLIPType.STABLE_DIFFUSION,
     "sd3": comfy.sd.CLIPType.SD3,
     "flux": comfy.sd.CLIPType.FLUX,
+    "mochi": getattr(comfy.sd.CLIPType, "MOCHI", None),
 }
 
 class CLIPLoaderGGUF:
