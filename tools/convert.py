@@ -47,7 +47,7 @@ class ModelSDXL(ModelTemplate):
 
 class ModelSD1(ModelTemplate):
     arch = "sd1"
-    shape_fix = False
+    shape_fix = True
     keys_detect = [
         ("down_blocks.0.downsamplers.0.conv.weight",),
         (
