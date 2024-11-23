@@ -39,10 +39,10 @@ index b16c462f..6d1568f1 100644
      const int idx = gguf_find_tensor(ctx, name);
      if (idx < 0) {
 diff --git a/src/llama.cpp b/src/llama.cpp
-index 24e1f1f0..a54fd6a2 100644
+index 24e1f1f0..aeccc173 100644
 --- a/src/llama.cpp
 +++ b/src/llama.cpp
-@@ -205,6 +205,10 @@ enum llm_arch {
+@@ -205,6 +205,11 @@ enum llm_arch {
      LLM_ARCH_GRANITE,
      LLM_ARCH_GRANITE_MOE,
      LLM_ARCH_CHAMELEON,
@@ -50,10 +50,11 @@ index 24e1f1f0..a54fd6a2 100644
 +    LLM_ARCH_SD1,
 +    LLM_ARCH_SDXL,
 +    LLM_ARCH_SD3,
++    LLM_ARCH_AURA,
      LLM_ARCH_UNKNOWN,
  };
  
-@@ -258,6 +262,10 @@ static const std::map<llm_arch, const char *> LLM_ARCH_NAMES = {
+@@ -258,6 +263,11 @@ static const std::map<llm_arch, const char *> LLM_ARCH_NAMES = {
      { LLM_ARCH_GRANITE,         "granite"      },
      { LLM_ARCH_GRANITE_MOE,     "granitemoe"   },
      { LLM_ARCH_CHAMELEON,       "chameleon"    },
@@ -61,10 +62,11 @@ index 24e1f1f0..a54fd6a2 100644
 +    { LLM_ARCH_SD1,             "sd1"          },
 +    { LLM_ARCH_SDXL,            "sdxl"         },
 +    { LLM_ARCH_SD3,             "sd3"          },
++    { LLM_ARCH_AURA,            "aura"         },
      { LLM_ARCH_UNKNOWN,         "(unknown)"    },
  };
  
-@@ -1531,6 +1539,10 @@ static const std::map<llm_arch, std::map<llm_tensor, const char *>> LLM_TENSOR_N
+@@ -1531,6 +1541,11 @@ static const std::map<llm_arch, std::map<llm_tensor, const char *>> LLM_TENSOR_N
              { LLM_TENSOR_ATTN_K_NORM,     "blk.%d.attn_k_norm" },
          },
      },
@@ -72,15 +74,16 @@ index 24e1f1f0..a54fd6a2 100644
 +    { LLM_ARCH_SD1,  {}},
 +    { LLM_ARCH_SDXL, {}},
 +    { LLM_ARCH_SD3,  {}},
++    { LLM_ARCH_AURA, {}},
      {
          LLM_ARCH_UNKNOWN,
          {
-@@ -5403,6 +5415,12 @@ static void llm_load_hparams(
+@@ -5403,6 +5418,12 @@ static void llm_load_hparams(
      // get general kv
      ml.get_key(LLM_KV_GENERAL_NAME, model.name, false);
  
 +    // Disable LLM metadata for image models
-+    if (model.arch == LLM_ARCH_FLUX || model.arch == LLM_ARCH_SD1 || model.arch == LLM_ARCH_SDXL || model.arch == LLM_ARCH_SD3) {
++    if (model.arch == LLM_ARCH_FLUX || model.arch == LLM_ARCH_SD1 || model.arch == LLM_ARCH_SDXL || model.arch == LLM_ARCH_SD3 || model.arch == LLM_ARCH_AURA) {
 +        model.ftype = ml.ftype;
 +        return;
 +    }
@@ -88,7 +91,7 @@ index 24e1f1f0..a54fd6a2 100644
      // get hparams kv
      ml.get_key(LLM_KV_VOCAB_SIZE, hparams.n_vocab, false) || ml.get_arr_n(LLM_KV_TOKENIZER_LIST, hparams.n_vocab);
  
-@@ -18016,6 +18034,122 @@ static void llama_tensor_dequantize_internal(
+@@ -18016,6 +18037,125 @@ static void llama_tensor_dequantize_internal(
      workers.clear();
  }
  
@@ -101,7 +104,8 @@ index 24e1f1f0..a54fd6a2 100644
 +    if (
 +            (name.find("model.diffusion_model.") != std::string::npos) ||
 +            (name.find("first_stage_model.") != std::string::npos) ||
-+            (name.find("single_transformer_blocks.") != std::string::npos)
++            (name.find("single_transformer_blocks.") != std::string::npos) ||
++            (name.find("joint_transformer_blocks.") != std::string::npos)
 +        ) {
 +            throw std::runtime_error("Invalid input GGUF file. This is not a supported UNET model");
 +    }
@@ -119,7 +123,9 @@ index 24e1f1f0..a54fd6a2 100644
 +
 +    if ( // Rules for to_v attention
 +            (name.find("attn_v.weight") != std::string::npos) ||
-+            (name.find(".to_v.weight") != std::string::npos)
++            (name.find(".to_v.weight") != std::string::npos) || 
++            (name.find(".attn.w1v.weight") != std::string::npos) ||
++            (name.find(".attn.w2v.weight") != std::string::npos)
 +        ){
 +            if (ftype == LLAMA_FTYPE_MOSTLY_Q2_K) {
 +                new_type = GGML_TYPE_Q3_K;
@@ -211,7 +217,7 @@ index 24e1f1f0..a54fd6a2 100644
  static ggml_type llama_tensor_get_type(quantize_state_internal & qs, ggml_type new_type, const ggml_tensor * tensor, llama_ftype ftype) {
      const std::string name = ggml_get_name(tensor);
  
-@@ -18547,6 +18681,15 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
+@@ -18547,6 +18687,29 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
              ctx_outs[i_split] = gguf_init_empty();
          }
          gguf_add_tensor(ctx_outs[i_split], tensor);
@@ -224,10 +230,24 @@ index 24e1f1f0..a54fd6a2 100644
 +                LLAMA_LOG_INFO("\n%s: Correcting pos_embed shape for SD3: [key:%s]\n", __func__, tensor->name);
 +            }
 +        }
++        // same goes for auraflow
++        if (model.arch == LLM_ARCH_AURA) {
++            const std::string name = ggml_get_name(tensor);
++            if (name == "positional_encoding" && tensor->ne[2] == 1) {
++                const int n_dim = 3;
++                gguf_set_tensor_ndim(ctx_outs[i_split], "positional_encoding", n_dim);
++                LLAMA_LOG_INFO("\n%s: Correcting positional_encoding shape for AuraFlow: [key:%s]\n", __func__, tensor->name);
++            }
++            if (name == "register_tokens" && tensor->ne[2] == 1) {
++                const int n_dim = 3;
++                gguf_set_tensor_ndim(ctx_outs[i_split], "register_tokens", n_dim);
++                LLAMA_LOG_INFO("\n%s: Correcting register_tokens shape for AuraFlow: [key:%s]\n", __func__, tensor->name);
++            }
++        }
      }
  
      // Set split info if needed
-@@ -18647,6 +18790,45 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
+@@ -18647,6 +18810,56 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
          // do not quantize relative position bias (T5)
          quantize &= name.find("attn_rel_b.weight") == std::string::npos;
  
@@ -265,6 +285,17 @@ index 24e1f1f0..a54fd6a2 100644
 +            quantize &= name != "proj_out.weight";
 +            quantize &= name != "pos_embed";
 +        }
++        if (model.arch == LLM_ARCH_AURA) {
++            image_model = true;
++            quantize &= name.find("t_embedder.") == std::string::npos;
++            quantize &= name.find("init_x_linear.") == std::string::npos;
++            quantize &= name != "modF.1.weight";
++            quantize &= name != "cond_seq_linear.weight";
++            quantize &= name != "final_linear.weight";
++            quantize &= name != "final_linear.weight";
++            quantize &= name != "positional_encoding";
++            quantize &= name != "register_tokens";
++        }
 +        // ignore 3D/4D tensors for image models as the code was never meant to handle these
 +        if (image_model) {
 +            quantize &= ggml_n_dims(tensor) == 2;
@@ -273,7 +304,7 @@ index 24e1f1f0..a54fd6a2 100644
          enum ggml_type new_type;
          void * new_data;
          size_t new_size;
-@@ -18655,6 +18837,9 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
+@@ -18655,6 +18868,9 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
              new_type = default_type;
  
              // get more optimal quantization type based on the tensor shape, layer, etc.
@@ -283,7 +314,7 @@ index 24e1f1f0..a54fd6a2 100644
              if (!params->pure && ggml_is_quantized(default_type)) {
                  new_type = llama_tensor_get_type(qs, new_type, tensor, ftype);
              }
-@@ -18664,6 +18849,7 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
+@@ -18664,6 +18880,7 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
              if (params->output_tensor_type < GGML_TYPE_COUNT && strcmp(tensor->name, "output.weight") == 0) {
                  new_type = params->output_tensor_type;
              }

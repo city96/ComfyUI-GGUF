@@ -19,7 +19,7 @@ git checkout tags/b3600
 git apply ..\lcpp.patch
 ```
 
-If you wish to use the SD3 version (`lcpp_sd3.patch`), which has slightly modified logic for quantizing, you'll want to target `tags/b3962` instead.
+If you wish to quantize **SD3** or **AuraFlow** models, you should use the patch named `lcpp_sd3.patch`, which has slightly modified logic for quantizing. For this you'll want to target `tags/b3962` instead.
 
 
 Then, compile the llama-quantize binary. This example uses cmake, on linux you can just use make.
