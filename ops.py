@@ -117,6 +117,7 @@ class GGMLLayer(torch.nn.Module):
 
         # dequantize tensor while patches load
         weight = dequantize_tensor(tensor, dtype, self.dequant_dtype)
+        weight.__class__ = torch.Tensor # prevent propagating custom tensor class
 
         # apply patches
         if patch_list:
