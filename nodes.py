@@ -208,16 +208,12 @@ class GGUFModelPatcher(comfy.model_patcher.ModelPatcher):
             self.mmap_released = True
 
     def clone(self, *args, **kwargs):
-        n = GGUFModelPatcher(self.model, self.load_device, self.offload_device, self.size, weight_inplace_update=self.weight_inplace_update)
-        n.patches = {}
-        for k in self.patches:
-            n.patches[k] = self.patches[k][:]
-        n.patches_uuid = self.patches_uuid
-
-        n.object_patches = self.object_patches.copy()
-        n.model_options = copy.deepcopy(self.model_options)
-        n.backup = self.backup
-        n.object_patches_backup = self.object_patches_backup
+        src_cls = self.__class__
+        self.__class__ = GGUFModelPatcher
+        n = super().clone(*args, **kwargs)
+        n.__class__ = GGUFModelPatcher
+        self.__class__ = src_cls
+        # GGUF specific clone values below
         n.patch_on_device = getattr(self, "patch_on_device", False)
         return n
 
