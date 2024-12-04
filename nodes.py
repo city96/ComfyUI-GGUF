@@ -313,12 +313,10 @@ class CLIPLoaderGGUF:
         clip_data = []
         for p in ckpt_paths:
             if p.endswith(".gguf"):
-                clip_data.append(gguf_clip_loader(p))
+                sd = gguf_clip_loader(p)
             else:
                 sd = comfy.utils.load_torch_file(p, safe_load=True)
-                clip_data.append(
-                    {k:GGMLTensor(v, tensor_type=gguf.GGMLQuantizationType.F16, tensor_shape=v.shape) for k,v in sd.items()}
-                )
+            clip_data.append(sd)
         return clip_data
 
     def load_patcher(self, clip_paths, clip_type, clip_data):
