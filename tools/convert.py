@@ -41,6 +41,16 @@ class ModelAura(ModelTemplate):
     ]
     keys_banned = ["joint_transformer_blocks.3.ff_context.out_projection.weight",]
 
+class ModelLTXV(ModelTemplate):
+    arch = "ltxv"
+    keys_detect = [
+        (
+            "adaln_single.emb.timestep_embedder.linear_2.weight",
+            "transformer_blocks.27.scale_shift_table",
+            "caption_projection.linear_2.weight",
+        )
+    ]
+
 class ModelSDXL(ModelTemplate):
     arch = "sdxl"
     shape_fix = True
@@ -65,7 +75,7 @@ class ModelSD1(ModelTemplate):
     ]
 
 # The architectures are checked in order and the first successful match terminates the search.
-arch_list = [ModelFlux, ModelSD3, ModelAura, ModelSDXL, ModelSD1]
+arch_list = [ModelFlux, ModelSD3, ModelAura, ModelLTXV,  ModelSDXL, ModelSD1]
 
 def is_model_arch(model, state_dict):
     # check if model is correct
