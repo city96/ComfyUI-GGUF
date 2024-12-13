@@ -119,7 +119,10 @@ class GGMLLayer(torch.nn.Module):
 
         # dequantize tensor while patches load
         weight = dequantize_tensor(tensor, dtype, self.dequant_dtype)
-        weight.__class__ = torch.Tensor # prevent propagating custom tensor class
+
+        # prevent propagating custom tensor class
+        if isinstance(weight, GGMLTensor):
+            weight.__class__ = torch.Tensor
 
         # apply patches
         if patch_list:
@@ -152,8 +155,14 @@ class GGMLLayer(torch.nn.Module):
 
     def forward_comfy_cast_weights(self, input, *args, **kwargs):
         if self.is_ggml_quantized():
-            return self.forward_ggml_cast_weights(input, *args, **kwargs)
-        return super().forward_comfy_cast_weights(input, *args, **kwargs)
+            out = self.forward_ggml_cast_weights(input, *args, **kwargs)
+        else:
+            out = super().forward_comfy_cast_weights(input, *args, **kwargs)
+
+        # non-ggml forward might still propagate custom tensor class
+        if isinstance(out, GGMLTensor):
+            out.__class__ = torch.Tensor
+        return out
 
     def forward_ggml_cast_weights(self, input):
         raise NotImplementedError
