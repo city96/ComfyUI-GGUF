@@ -5,7 +5,7 @@ import gguf
 from .ops import GGMLTensor
 
 IMG_ARCH_LIST = {"flux", "sd1", "sdxl", "sd3", "aura", "ltxv", "hyvid"}
-TXT_ARCH_LIST = {"t5", "t5encoder"}
+TXT_ARCH_LIST = {"t5", "t5encoder", "llama"}
 
 def get_orig_shape(reader, tensor_name):
     field_key = f"comfy.gguf.orig_shape.{tensor_name}"
@@ -105,6 +105,22 @@ T5_SD_MAP = {
     "ffn_norm": "layer.1.layer_norm",
 }
 
+LLAMA_SD_MAP = {
+    "blk.": "model.layers.",
+    "attn_norm": "input_layernorm",
+    "attn_q": "self_attn.q_proj",
+    "attn_k": "self_attn.k_proj",
+    "attn_v": "self_attn.v_proj",
+    "attn_output": "self_attn.o_proj",
+    "ffn_up": "mlp.up_proj",
+    "ffn_down": "mlp.down_proj",
+    "ffn_gate": "mlp.gate_proj",
+    "ffn_norm": "post_attention_layernorm",
+    "token_embd": "model.embed_tokens",
+    "output_norm": "model.norm",
+    "output.weight": "lm_head.weight",
+}
+
 def sd_map_replace(raw_sd, key_map):
     sd = {}
     for k,v in raw_sd.items():
@@ -113,10 +129,29 @@ def sd_map_replace(raw_sd, key_map):
         sd[k] = v
     return sd
 
+def llama_permute(raw_sd, n_head, n_head_kv):
+    # Reverse version of LlamaModel.permute in llama.cpp convert script
+    sd = {}
+    permute = lambda x,h: x.reshape(h, x.shape[0] // h // 2, 2, *x.shape[1:]).swapaxes(1, 2).reshape(x.shape)
+    for k,v in raw_sd.items():
+        if k.endswith(("q_proj.weight", "q_proj.bias")):
+            v.data = permute(v.data, n_head)
+        if k.endswith(("k_proj.weight", "k_proj.bias")):
+            v.data = permute(v.data, n_head_kv)
+        sd[k] = v
+    return sd
+
 def gguf_clip_loader(path):
     sd, arch = gguf_sd_loader(path, return_arch=True)
-    if "enc.blk.23.ffn_up.weight" in sd or arch in {"t5", "t5encoder"}:
+    if arch in {"t5", "t5encoder"}:
         sd = sd_map_replace(sd, T5_SD_MAP)
+    elif arch in {"llama"}:
+        temb_key = "token_embd.weight"
+        if temb_key in sd and sd[temb_key].shape != (128320, 4096):
+            # This still works. Raise error?
+            print("Warning! token_embd shape may be incorrect for llama 3 model!")
+        sd = sd_map_replace(sd, LLAMA_SD_MAP)
+        sd = llama_permute(sd, 32, 8) # L3
     else:
         pass
     return sd

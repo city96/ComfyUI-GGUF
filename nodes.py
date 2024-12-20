@@ -178,6 +178,7 @@ CLIP_TYPE_MAP = {
     "flux": comfy.sd.CLIPType.FLUX,
     "mochi": getattr(comfy.sd.CLIPType, "MOCHI", None),
     "ltxv": getattr(comfy.sd.CLIPType, "LTXV", None),
+    "hunyuan_video": getattr(comfy.sd.CLIPType, "HUNYUAN_VIDEO", None),
 }
 
 def get_clip_type(type):
@@ -254,7 +255,7 @@ class DualCLIPLoaderGGUF(CLIPLoaderGGUF):
             "required": {
                 "clip_name1": file_options,
                 "clip_name2": file_options,
-                "type": (("sdxl", "sd3", "flux"), ),
+                "type": (("sdxl", "sd3", "flux", "hunyuan_video"),),
             }
         }
 
