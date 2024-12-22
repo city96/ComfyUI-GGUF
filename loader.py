@@ -81,8 +81,9 @@ def gguf_sd_loader(path, handle_prefix="model.diffusion_model.", return_arch=Fal
 
     # mark largest tensor for vram estimation
     qsd = {k:v for k,v in state_dict.items() if is_quantized(v)}
-    max_key = max(qsd.keys(), key=lambda k: qsd[k].numel())
-    state_dict[max_key].is_largest_weight = True
+    if len(qsd) > 0:
+        max_key = max(qsd.keys(), key=lambda k: qsd[k].numel())
+        state_dict[max_key].is_largest_weight = True
 
     # sanity check debug print
     print("\nggml_sd_loader:")
