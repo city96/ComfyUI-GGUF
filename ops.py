@@ -62,6 +62,7 @@ class GGMLLayer(torch.nn.Module):
     comfy_cast_weights = True
     dequant_dtype = None
     patch_dtype = None
+    largest_layer = False
     torch_compatible_tensor_types = {None, gguf.GGMLQuantizationType.F32, gguf.GGMLQuantizationType.F16}
 
     def is_ggml_quantized(self, *, weight=None, bias=None):
@@ -87,11 +88,16 @@ class GGMLLayer(torch.nn.Module):
                 self.bias = torch.nn.Parameter(v, requires_grad=False)
             else:
                 unexpected_keys.append(k)
+
         # For Linear layer with missing weight
         if self.weight is None and isinstance(self, torch.nn.Linear):
             v = torch.zeros(self.in_features, self.out_features)
             self.weight = torch.nn.Parameter(v, requires_grad=False)
             missing_keys.append(prefix+"weight")
+
+        # for vram estimation (TODO: less fragile logic?)
+        if getattr(self.weight, "is_largest_weight", False):
+            self.largest_layer = True
 
     def _save_to_state_dict(self, *args, **kwargs):
         if self.is_ggml_quantized():
@@ -105,9 +111,16 @@ class GGMLLayer(torch.nn.Module):
         if self.bias is not None:
             bias = torch.zeros_like(self.bias, device=torch.device("meta"))
             destination[prefix + "bias"] = bias
-        return
 
-        # This would return the actual state dict
+        # Take into account space required for dequantizing the largest tensor
+        if self.largest_layer:
+            shape = getattr(self.weight, "tensor_shape", self.weight.shape)
+            dtype = self.dequant_dtype or torch.float16
+            temp = torch.empty(*shape, device=torch.device("meta"), dtype=dtype)
+            destination[prefix + "temp.weight"] = temp
+
+        return
+        # This would return the dequantized state dict
         destination[prefix + "weight"] = self.get_weight(self.weight)
         if bias is not None:
             destination[prefix + "bias"] = self.get_weight(self.bias)

@@ -3,6 +3,7 @@ import torch
 import gguf
 
 from .ops import GGMLTensor
+from .dequant import is_quantized
 
 IMG_ARCH_LIST = {"flux", "sd1", "sdxl", "sd3", "aura", "ltxv", "hyvid"}
 TXT_ARCH_LIST = {"t5", "t5encoder", "llama"}
@@ -77,6 +78,11 @@ def gguf_sd_loader(path, handle_prefix="model.diffusion_model.", return_arch=Fal
             torch_tensor = torch_tensor.view(*shape)
         state_dict[sd_key] = GGMLTensor(torch_tensor, tensor_type=tensor.tensor_type, tensor_shape=shape)
         qtype_dict[tensor_type_str] = qtype_dict.get(tensor_type_str, 0) + 1
+
+    # mark largest tensor for vram estimation
+    qsd = {k:v for k,v in state_dict.items() if is_quantized(v)}
+    max_key = max(qsd.keys(), key=lambda k: qsd[k].numel())
+    state_dict[max_key].is_largest_weight = True
 
     # sanity check debug print
     print("\nggml_sd_loader:")
