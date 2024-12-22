@@ -86,7 +86,12 @@ class GGMLLayer(torch.nn.Module):
             elif k[prefix_len:] == "bias" and v is not None:
                 self.bias = torch.nn.Parameter(v, requires_grad=False)
             else:
-                missing_keys.append(k)
+                unexpected_keys.append(k)
+        # For Linear layer with missing weight
+        if self.weight is None and isinstance(self, torch.nn.Linear):
+            v = torch.zeros(self.in_features, self.out_features)
+            self.weight = torch.nn.Parameter(v, requires_grad=False)
+            missing_keys.append(prefix+"weight")
 
     def _save_to_state_dict(self, *args, **kwargs):
         if self.is_ggml_quantized():
