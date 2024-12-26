@@ -13,14 +13,20 @@ from .ops import GGMLOps, move_patch_to_device
 from .loader import gguf_sd_loader, gguf_clip_loader
 from .dequant import is_quantized, is_torch_compatible
 
-# Add a custom keys for files ending in .gguf
-if "unet_gguf" not in folder_paths.folder_names_and_paths:
-    orig = folder_paths.folder_names_and_paths.get("diffusion_models", folder_paths.folder_names_and_paths.get("unet", [[], set()]))
-    folder_paths.folder_names_and_paths["unet_gguf"] = (orig[0], {".gguf"})
+def update_folder_names_and_paths(key, targets=[]):
+    # check for existing key
+    base = folder_paths.folder_names_and_paths.get(key, ([], {}))
+    base = base[0] if isinstance(base[0], (list, set, tuple)) else []
+    # find base key & add w/ fallback, sanity check + warning
+    target = next((x for x in targets if x in folder_paths.folder_names_and_paths), targets[0])
+    orig, _ = folder_paths.folder_names_and_paths.get(target, ([], {}))
+    folder_paths.folder_names_and_paths[key] = (orig or base, {".gguf"})
+    if base and base != orig:
+        logging.warning(f"Unknown file list already present on key {key}: {base}")
 
-if "clip_gguf" not in folder_paths.folder_names_and_paths:
-    orig = folder_paths.folder_names_and_paths.get("text_encoders", folder_paths.folder_names_and_paths.get("clip", [[], set()]))
-    folder_paths.folder_names_and_paths["clip_gguf"] = (orig[0], {".gguf"})
+# Add a custom keys for files ending in .gguf
+update_folder_names_and_paths("unet_gguf", ["diffusion_models", "unet"])
+update_folder_names_and_paths("clip_gguf", ["text_encoders", "clip"])
 
 class GGUFModelPatcher(comfy.model_patcher.ModelPatcher):
     patch_on_device = False
