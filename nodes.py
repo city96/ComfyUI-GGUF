@@ -174,25 +174,27 @@ class UnetLoaderGGUFAdvanced(UnetLoaderGGUF):
         }
     TITLE = "Unet Loader (GGUF/Advanced)"
 
-# Mapping from name to CLIPType enum with fallback
-CLIP_TYPE_MAP = {
-    "stable_diffusion": comfy.sd.CLIPType.STABLE_DIFFUSION,
-    "stable_cascade": comfy.sd.CLIPType.STABLE_CASCADE,
-    "stable_audio": comfy.sd.CLIPType.STABLE_AUDIO,
-    "sdxl": comfy.sd.CLIPType.STABLE_DIFFUSION,
-    "sd3": comfy.sd.CLIPType.SD3,
-    "flux": comfy.sd.CLIPType.FLUX,
-    "mochi": getattr(comfy.sd.CLIPType, "MOCHI", None),
-    "ltxv": getattr(comfy.sd.CLIPType, "LTXV", None),
-    "hunyuan_video": getattr(comfy.sd.CLIPType, "HUNYUAN_VIDEO", None),
+# Mapping from common name to name used in comfy.sd.CLIPType enum
+CLIP_ENUM_MAP = {
+    "stable_diffusion": "STABLE_DIFFUSION",
+    "stable_cascade":   "STABLE_CASCADE",
+    "stable_audio":     "STABLE_AUDIO",
+    "sdxl":             "STABLE_DIFFUSION",
+    "sd3":              "SD3",
+    "flux":             "FLUX",
+    "mochi":            "MOCHI",
+    "ltxv":             "LTXV",
+    "hunyuan_video":    "HUNYUAN_VIDEO",
+    "pixart":           "PIXART",
 }
 
-def get_clip_type(type):
-    if type not in CLIP_TYPE_MAP:
-        raise ValueError(f"Unknown CLIP model type {type}") 
-    clip_type = CLIP_TYPE_MAP[type]
+def get_clip_type(name):
+    enum_name = CLIP_ENUM_MAP.get(name, None)
+    if enum_name is None:
+        raise ValueError(f"Unknown CLIP model type {name}") 
+    clip_type = getattr(comfy.sd.CLIPType, CLIP_ENUM_MAP[name], None)
     if clip_type is None:
-        raise ValueError(f"Unsupported CLIP model type {type} (Update ComfyUI)")
+        raise ValueError(f"Unsupported CLIP model type {name} (Update ComfyUI)")
     return clip_type
 
 class CLIPLoaderGGUF:
@@ -201,7 +203,7 @@ class CLIPLoaderGGUF:
         return {
             "required": {
                 "clip_name": (s.get_filename_list(),),
-                "type": (["stable_diffusion", "stable_cascade", "sd3", "stable_audio", "mochi", "ltxv"],),
+                "type": (["stable_diffusion", "stable_cascade", "sd3", "stable_audio", "mochi", "ltxv", "pixart"],),
             }
         }
 
