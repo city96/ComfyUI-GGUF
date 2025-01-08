@@ -10,12 +10,16 @@ from safetensors.torch import load_file
 QUANTIZATION_THRESHOLD = 1024
 REARRANGE_THRESHOLD = 512
 MAX_TENSOR_NAME_LENGTH = 127
+MAX_TENSOR_DIMS = 4
 
 class ModelTemplate:
     arch = "invalid"  # string describing architecture
     shape_fix = False # whether to reshape tensors
     keys_detect = []  # list of lists to match in state dict
     keys_banned = []  # list of keys that should mark model as invalid for conversion
+
+    def handle_nd_tensor(self, key, data):
+        raise NotImplementedError(f"Tensor detected that exceeds dims supported by C++ code! ({key} @ {data.shape})")
 
 class ModelFlux(ModelTemplate):
     arch = "flux"
@@ -93,7 +97,7 @@ def detect_arch(state_dict):
     model_arch = None
     for arch in arch_list:
         if is_model_arch(arch, state_dict):
-            model_arch = arch
+            model_arch = arch()
             break
     assert model_arch is not None, "Unknown model architecture!"
     return model_arch
@@ -113,6 +117,8 @@ def load_state_dict(path):
     if any(path.endswith(x) for x in [".ckpt", ".pt", ".bin", ".pth"]):
         state_dict = torch.load(path, map_location="cpu", weights_only=True)
         state_dict = state_dict.get("model", state_dict)
+        if len(state_dict) < 20:
+            raise RuntimeError(f"pt subkey load failed: {state_dict.keys()}")
     else:
         state_dict = load_file(path)
 
@@ -169,6 +175,11 @@ def handle_tensors(writer, state_dict, model_arch):
             gguf.GGMLQuantizationType,
             "BF16" if old_dtype == torch.bfloat16 else "F16"
         )
+
+        # The max no. of dimensions that can be handled by the quantization code is 4
+        if len(data.shape) > MAX_TENSOR_DIMS:
+            model_arch.handle_nd_tensor(key, data)
+            continue # needs to be added back later
 
         # get number of parameters (AKA elements) in this tensor
         n_params = 1
