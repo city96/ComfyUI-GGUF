@@ -140,7 +140,7 @@ def load_model(path):
     writer = gguf.GGUFWriter(path=None, arch=model_arch.arch)
     return (writer, state_dict, model_arch)
 
-def handle_tensors(args, writer, state_dict, model_arch):
+def handle_tensors(writer, state_dict, model_arch):
     name_lengths = tuple(sorted(
         ((key, len(key)) for key in state_dict.keys()),
         key=lambda item: item[1],
@@ -175,18 +175,6 @@ def handle_tensors(args, writer, state_dict, model_arch):
         for dim_size in data_shape:
             n_params *= dim_size
 
-        # keys to keep as max precision
-        blacklist = {
-            "time_embedding.",
-            "add_embedding.",
-            "time_in.",
-            "txt_in.",
-            "vector_in.",
-            "img_in.",
-            "guidance_in.",
-            "final_layer.",
-        }
-
         if old_dtype in (torch.float32, torch.bfloat16):
             if n_dims == 1:
                 # one-dimensional tensors should be kept in F32
@@ -195,9 +183,6 @@ def handle_tensors(args, writer, state_dict, model_arch):
 
             elif n_params <= QUANTIZATION_THRESHOLD:
                 # very small tensors
-                data_qtype = gguf.GGMLQuantizationType.F32
-
-            elif ".weight" in key and any(x in key for x in blacklist):
                 data_qtype = gguf.GGMLQuantizationType.F32
 
         if (model_arch.shape_fix                        # NEVER reshape for models such as flux
@@ -241,7 +226,7 @@ if __name__ == "__main__":
     if os.path.isfile(out_path):
         input("Output exists enter to continue or ctrl+c to abort!")
 
-    handle_tensors(path, writer, state_dict, model_arch)
+    handle_tensors(writer, state_dict, model_arch)
     writer.write_header_to_file(path=out_path)
     writer.write_kv_data_to_file()
     writer.write_tensors_to_file(progress=True)
