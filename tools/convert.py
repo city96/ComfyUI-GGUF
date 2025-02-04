@@ -17,11 +17,19 @@ class ModelTemplate:
     keys_detect = []  # list of lists to match in state dict
     keys_banned = []  # list of keys that should mark model as invalid for conversion
 
+class ModelChroma(ModelTemplate):
+    arch = "chroma"  # string describing architecture
+    keys_detect = [
+        ("transformer_blocks.0.attn.norm_added_k.weight",),
+        ("distilled_guidance_layer.in_proj.weight",),
+    ]
+    keys_banned = ["transformer_blocks.0.attn.norm_added_k.weight",]
+
 class ModelFlux(ModelTemplate):
     arch = "flux"
     keys_detect = [
         ("transformer_blocks.0.attn.norm_added_k.weight",),
-        ("double_blocks.0.img_attn.proj.weight",),
+        ("double_blocks.0.img_mod.lin.weight",),
     ]
     keys_banned = ["transformer_blocks.0.attn.norm_added_k.weight",]
 
@@ -75,7 +83,7 @@ class ModelSD1(ModelTemplate):
     ]
 
 # The architectures are checked in order and the first successful match terminates the search.
-arch_list = [ModelFlux, ModelSD3, ModelAura, ModelLTXV,  ModelSDXL, ModelSD1]
+arch_list = [ModelChroma, ModelFlux, ModelSD3, ModelAura, ModelLTXV,  ModelSDXL, ModelSD1]
 
 def is_model_arch(model, state_dict):
     # check if model is correct
@@ -185,6 +193,7 @@ def handle_tensors(args, writer, state_dict, model_arch):
             "img_in.",
             "guidance_in.",
             "final_layer.",
+            "distilled_guidance_layer.",
         }
 
         if old_dtype in (torch.float32, torch.bfloat16):

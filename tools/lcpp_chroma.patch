@@ -1,0 +1,228 @@
+diff --git a/ggml/include/ggml.h b/ggml/include/ggml.h
+index 1d2a3540..b1a9ee96 100644
+--- a/ggml/include/ggml.h
++++ b/ggml/include/ggml.h
+@@ -230,7 +230,7 @@
+ #define GGML_MAX_CONTEXTS       64
+ #define GGML_MAX_SRC            10
+ #ifndef GGML_MAX_NAME
+-#define GGML_MAX_NAME           64
++#define GGML_MAX_NAME          128
+ #endif
+ #define GGML_MAX_OP_PARAMS      64
+ #define GGML_DEFAULT_N_THREADS  4
+diff --git a/src/llama.cpp b/src/llama.cpp
+index 5ab65ea9..3c797f4d 100644
+--- a/src/llama.cpp
++++ b/src/llama.cpp
+@@ -212,6 +212,10 @@ enum llm_arch {
+     LLM_ARCH_JAIS,
+     LLM_ARCH_NEMOTRON,
+     LLM_ARCH_EXAONE,
++    LLM_ARCH_FLUX,
++    LLM_ARCH_SD1,
++    LLM_ARCH_SDXL,
++    LLM_ARCH_CHROMA,
+     LLM_ARCH_UNKNOWN,
+ };
+ 
+@@ -259,6 +263,10 @@ static const std::map<llm_arch, const char *> LLM_ARCH_NAMES = {
+     { LLM_ARCH_JAIS,            "jais"         },
+     { LLM_ARCH_NEMOTRON,        "nemotron"     },
+     { LLM_ARCH_EXAONE,          "exaone"       },
++    { LLM_ARCH_FLUX,            "flux"         },
++    { LLM_ARCH_SD1,             "sd1"          },
++    { LLM_ARCH_SDXL,            "sdxl"         },
++    { LLM_ARCH_CHROMA,          "chroma"       },
+     { LLM_ARCH_UNKNOWN,         "(unknown)"    },
+ };
+ 
+@@ -1337,6 +1345,10 @@ static const std::map<llm_arch, std::map<llm_tensor, std::string>> LLM_TENSOR_NA
+             { LLM_TENSOR_FFN_UP,          "blk.%d.ffn_up" },
+         },
+     },
++    { LLM_ARCH_FLUX, {}},
++    { LLM_ARCH_SD1,  {}},
++    { LLM_ARCH_SDXL, {}},
++    { LLM_ARCH_CHROMA, {}},
+     {
+         LLM_ARCH_UNKNOWN,
+         {
+@@ -4629,6 +4641,12 @@ static void llm_load_hparams(
+     // get general kv
+     ml.get_key(LLM_KV_GENERAL_NAME, model.name, false);
+ 
++    // Disable LLM metadata for image models
++    if (model.arch == LLM_ARCH_FLUX || model.arch == LLM_ARCH_SD1 || model.arch == LLM_ARCH_SDXL || model.arch == LLM_ARCH_CHROMA) {
++        model.ftype = ml.ftype;
++        return;
++    }
++
+     // get hparams kv
+     ml.get_key(LLM_KV_VOCAB_SIZE, hparams.n_vocab, false) || ml.get_arr_n(LLM_KV_TOKENIZER_LIST, hparams.n_vocab);
+ 
+@@ -15827,11 +15845,164 @@ static void llama_tensor_dequantize_internal(
+     workers.clear();
+ }
+ 
++static ggml_type img_tensor_get_type(quantize_state_internal & qs, ggml_type new_type, const ggml_tensor * tensor, llama_ftype ftype) {
++    // Special function for quantizing image model tensors
++    const std::string name = ggml_get_name(tensor);
++    const llm_arch arch = qs.model.arch;
++
++    // Sanity check
++    if (
++            (name.find("model.diffusion_model.") != std::string::npos) ||
++            (name.find("first_stage_model.") != std::string::npos) ||
++            (name.find("single_transformer_blocks.") != std::string::npos)
++        ) {
++            throw std::runtime_error("Invalid input GGUF file. This is not a supported UNET model");
++    }
++
++    // Unsupported quant types - exclude all IQ quants for now
++    if (ftype == LLAMA_FTYPE_MOSTLY_IQ2_XXS || ftype == LLAMA_FTYPE_MOSTLY_IQ2_XS  ||
++        ftype == LLAMA_FTYPE_MOSTLY_IQ2_S   || ftype == LLAMA_FTYPE_MOSTLY_IQ2_M  ||
++        ftype == LLAMA_FTYPE_MOSTLY_IQ3_XXS || ftype == LLAMA_FTYPE_MOSTLY_IQ1_S  ||
++        ftype == LLAMA_FTYPE_MOSTLY_IQ1_M   || ftype == LLAMA_FTYPE_MOSTLY_IQ4_NL ||
++        ftype == LLAMA_FTYPE_MOSTLY_IQ4_XS  || ftype == LLAMA_FTYPE_MOSTLY_IQ3_S  ||
++        ftype == LLAMA_FTYPE_MOSTLY_IQ3_M   || ftype == LLAMA_FTYPE_MOSTLY_Q4_0_4_4 ||
++        ftype == LLAMA_FTYPE_MOSTLY_Q4_0_4_8 || ftype == LLAMA_FTYPE_MOSTLY_Q4_0_8_8) {
++        throw std::runtime_error("Invalid quantization type for image model (Not supported)");
++    }
++
++    if ( // Tensors to keep in FP32 precision
++        (arch == LLM_ARCH_FLUX || arch == LLM_ARCH_CHROMA) && (
++            (name.find("distilled_guidance_layer.in_proj.") != std::string::npos) ||
++            (name.find("img_in.") != std::string::npos) ||
++            (name.find("time_in.in_layer.") != std::string::npos) ||
++            (name.find("vector_in.in_layer.") != std::string::npos) ||
++            (name.find("guidance_in.in_layer.") != std::string::npos) ||
++            (name.find("final_layer.linear.") != std::string::npos)
++        ) || (arch == LLM_ARCH_SD1 || arch == LLM_ARCH_SDXL) && (
++            (name.find("conv_in.") != std::string::npos) ||
++            (name.find("conv_out.") != std::string::npos) ||
++            (name == "input_blocks.0.0.weight") ||
++            (name == "out.2.weight")
++        )) {
++            new_type = GGML_TYPE_F32;
++    } else if ( // Tensors to keep in FP16 precision
++        (arch == LLM_ARCH_FLUX || arch == LLM_ARCH_CHROMA) && (
++            (name.find("distilled_guidance_layer.") != std::string::npos) ||
++            (name.find("txt_in.") != std::string::npos) ||
++            (name.find("time_in.") != std::string::npos) ||
++            (name.find("vector_in.") != std::string::npos) ||
++            (name.find("guidance_in.") != std::string::npos) ||
++            (name.find("final_layer.") != std::string::npos)
++        ) || (arch == LLM_ARCH_SD1 || arch == LLM_ARCH_SDXL) && (
++            (name.find("class_embedding.") != std::string::npos) ||
++            (name.find("time_embedding.") != std::string::npos) ||
++            (name.find("add_embedding.") != std::string::npos) ||
++            (name.find("time_embed.") != std::string::npos) ||
++            (name.find("label_emb.") != std::string::npos) ||
++            (name.find("proj_in.") != std::string::npos) ||
++            (name.find("proj_out.") != std::string::npos)
++            // (name.find("conv_shortcut.") != std::string::npos) // marginal improvement
++        )) {
++            new_type = GGML_TYPE_F16;
++    } else if ( // Rules for to_v attention
++            (name.find("attn_v.weight") != std::string::npos) ||
++            (name.find(".to_v.weight") != std::string::npos)
++        ){
++            if (ftype == LLAMA_FTYPE_MOSTLY_Q2_K) {
++                new_type = GGML_TYPE_Q3_K;
++            }
++            else if (ftype == LLAMA_FTYPE_MOSTLY_Q3_K_M) {
++                new_type = qs.i_attention_wv < 2 ? GGML_TYPE_Q5_K : GGML_TYPE_Q4_K;
++            }
++            else if (ftype == LLAMA_FTYPE_MOSTLY_Q3_K_L) {
++                new_type = GGML_TYPE_Q5_K;
++            }
++            else if (ftype == LLAMA_FTYPE_MOSTLY_Q4_K_M || ftype == LLAMA_FTYPE_MOSTLY_Q5_K_M) {
++                new_type = GGML_TYPE_Q6_K;
++            }
++            else if (ftype == LLAMA_FTYPE_MOSTLY_Q4_K_S && qs.i_attention_wv < 4) {
++                new_type = GGML_TYPE_Q5_K;
++            }
++            ++qs.i_attention_wv;
++    } else if ( // Rules for fused qkv attention
++            (name.find("attn_qkv.weight") != std::string::npos) ||
++            (name.find("attn.qkv.weight") != std::string::npos)
++        ) {
++            if (ftype == LLAMA_FTYPE_MOSTLY_Q3_K_M || ftype == LLAMA_FTYPE_MOSTLY_Q3_K_L) {
++                new_type = GGML_TYPE_Q4_K;
++            }
++            else if (ftype == LLAMA_FTYPE_MOSTLY_Q4_K_M) {
++                new_type = GGML_TYPE_Q5_K;
++            }
++            else if (ftype == LLAMA_FTYPE_MOSTLY_Q5_K_M) {
++                new_type = GGML_TYPE_Q6_K;
++            }
++    } else if ( // Rules for ffn
++            (name.find("ffn_down") != std::string::npos) ||
++            (name.find("DenseReluDense.wo") != std::string::npos)
++        ) {
++            // TODO: add back `layer_info` with some model specific logic + logic further down
++            if (ftype == LLAMA_FTYPE_MOSTLY_Q3_K_M) {
++                new_type = GGML_TYPE_Q4_K;
++            }
++            else if (ftype == LLAMA_FTYPE_MOSTLY_Q3_K_L) {
++                new_type = GGML_TYPE_Q5_K;
++            }
++            else if (ftype == LLAMA_FTYPE_MOSTLY_Q4_K_S) {
++                new_type = GGML_TYPE_Q5_K;
++            }
++            else if (ftype == LLAMA_FTYPE_MOSTLY_Q4_K_M) {
++                new_type = GGML_TYPE_Q6_K;
++            }
++            else if (ftype == LLAMA_FTYPE_MOSTLY_Q5_K_M) {
++                new_type = GGML_TYPE_Q6_K;
++            }
++            else if (ftype == LLAMA_FTYPE_MOSTLY_Q4_0) {
++                new_type = GGML_TYPE_Q4_1;
++            }
++            else if (ftype == LLAMA_FTYPE_MOSTLY_Q5_0) {
++                new_type = GGML_TYPE_Q5_1;
++            }
++            ++qs.i_ffn_down;
++    }
++
++    // Sanity check for row shape
++    bool convert_incompatible_tensor = false;
++    if (new_type == GGML_TYPE_Q2_K    || new_type == GGML_TYPE_Q3_K    || new_type == GGML_TYPE_Q4_K   ||
++        new_type == GGML_TYPE_Q5_K    || new_type == GGML_TYPE_Q6_K) {
++        int nx = tensor->ne[0];
++        int ny = tensor->ne[1];
++        if (nx % QK_K != 0) {
++            LLAMA_LOG_WARN("\n\n%s : tensor cols %d x %d are not divisible by %d, required for %s", __func__, nx, ny, QK_K, ggml_type_name(new_type));
++            convert_incompatible_tensor = true;
++        } else {
++            ++qs.n_k_quantized;
++        }
++    }
++    if (convert_incompatible_tensor) {
++        // TODO: Possibly reenable this in the future
++        // switch (new_type) {
++        //     case GGML_TYPE_Q2_K:
++        //     case GGML_TYPE_Q3_K:
++        //     case GGML_TYPE_Q4_K:   new_type = GGML_TYPE_Q5_0;   break;
++        //     case GGML_TYPE_Q5_K:   new_type = GGML_TYPE_Q5_1;   break;
++        //     case GGML_TYPE_Q6_K:   new_type = GGML_TYPE_Q8_0;   break;
++        //     default: throw std::runtime_error("\nUnsupported tensor size encountered\n");
++        // }
++        new_type = GGML_TYPE_F16;
++        LLAMA_LOG_WARN(" - using fallback quantization %s\n", ggml_type_name(new_type));
++        ++qs.n_fallback;
++    }
++    return new_type;
++}
++
++
+ static ggml_type llama_tensor_get_type(quantize_state_internal & qs, ggml_type new_type, const ggml_tensor * tensor, llama_ftype ftype) {
+     const std::string name = ggml_get_name(tensor);
+ 
+     // TODO: avoid hardcoded tensor names - use the TN_* constants
+     const llm_arch arch = qs.model.arch;
++    if (arch == LLM_ARCH_FLUX || arch == LLM_ARCH_SD1 || arch == LLM_ARCH_SDXL || arch == LLM_ARCH_CHROMA) { return img_tensor_get_type(qs, new_type, tensor, ftype); };
+     const auto       tn = LLM_TN(arch);
+ 
+     auto use_more_bits = [](int i_layer, int n_layers) -> bool {
