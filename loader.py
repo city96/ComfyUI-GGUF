@@ -49,7 +49,7 @@ def gguf_sd_loader(path, handle_prefix="model.diffusion_model.", return_arch=Fal
             raise TypeError(f"Bad type for GGUF general.architecture key: expected string, got {arch_field.types!r}")
         arch_str = str(arch_field.parts[arch_field.data[-1]], encoding="utf-8")
         if arch_str not in IMG_ARCH_LIST and arch_str not in TXT_ARCH_LIST:
-            raise ValueError(f"Unexpected architecture type in GGUF file, expected one of flux, chroma, sd1, sdxl, t5encoder but got {arch_str!r}")
+            raise ValueError(f"Unexpected architecture type in GGUF file, expected one of flux, sd1, sdxl, t5encoder but got {arch_str!r}")
     else: # stable-diffusion.cpp
         # import here to avoid changes to convert.py breaking regular models
         from .tools.convert import detect_arch
