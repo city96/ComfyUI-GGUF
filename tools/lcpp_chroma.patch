@@ -22,7 +22,6 @@ index 5ab65ea9..3c797f4d 100644
 +    LLM_ARCH_FLUX,
 +    LLM_ARCH_SD1,
 +    LLM_ARCH_SDXL,
-+    LLM_ARCH_CHROMA,
      LLM_ARCH_UNKNOWN,
  };
  
@@ -33,7 +32,6 @@ index 5ab65ea9..3c797f4d 100644
 +    { LLM_ARCH_FLUX,            "flux"         },
 +    { LLM_ARCH_SD1,             "sd1"          },
 +    { LLM_ARCH_SDXL,            "sdxl"         },
-+    { LLM_ARCH_CHROMA,          "chroma"       },
      { LLM_ARCH_UNKNOWN,         "(unknown)"    },
  };
  
@@ -44,7 +42,6 @@ index 5ab65ea9..3c797f4d 100644
 +    { LLM_ARCH_FLUX, {}},
 +    { LLM_ARCH_SD1,  {}},
 +    { LLM_ARCH_SDXL, {}},
-+    { LLM_ARCH_CHROMA, {}},
      {
          LLM_ARCH_UNKNOWN,
          {
@@ -53,7 +50,7 @@ index 5ab65ea9..3c797f4d 100644
      ml.get_key(LLM_KV_GENERAL_NAME, model.name, false);
  
 +    // Disable LLM metadata for image models
-+    if (model.arch == LLM_ARCH_FLUX || model.arch == LLM_ARCH_SD1 || model.arch == LLM_ARCH_SDXL || model.arch == LLM_ARCH_CHROMA) {
++    if (model.arch == LLM_ARCH_FLUX || model.arch == LLM_ARCH_SD1 || model.arch == LLM_ARCH_SDXL) {
 +        model.ftype = ml.ftype;
 +        return;
 +    }
@@ -91,7 +88,7 @@ index 5ab65ea9..3c797f4d 100644
 +    }
 +
 +    if ( // Tensors to keep in FP32 precision
-+        (arch == LLM_ARCH_FLUX || arch == LLM_ARCH_CHROMA) && (
++        (arch == LLM_ARCH_FLUX) && (
 +            (name.find("distilled_guidance_layer.in_proj.") != std::string::npos) ||
 +            (name.find("img_in.") != std::string::npos) ||
 +            (name.find("time_in.in_layer.") != std::string::npos) ||
@@ -106,7 +103,7 @@ index 5ab65ea9..3c797f4d 100644
 +        )) {
 +            new_type = GGML_TYPE_F32;
 +    } else if ( // Tensors to keep in FP16 precision
-+        (arch == LLM_ARCH_FLUX || arch == LLM_ARCH_CHROMA) && (
++        (arch == LLM_ARCH_FLUX) && (
 +            (name.find("distilled_guidance_layer.") != std::string::npos) ||
 +            (name.find("txt_in.") != std::string::npos) ||
 +            (name.find("time_in.") != std::string::npos) ||
@@ -222,7 +219,7 @@ index 5ab65ea9..3c797f4d 100644
  
      // TODO: avoid hardcoded tensor names - use the TN_* constants
      const llm_arch arch = qs.model.arch;
-+    if (arch == LLM_ARCH_FLUX || arch == LLM_ARCH_SD1 || arch == LLM_ARCH_SDXL || arch == LLM_ARCH_CHROMA) { return img_tensor_get_type(qs, new_type, tensor, ftype); };
++    if (arch == LLM_ARCH_FLUX || arch == LLM_ARCH_SD1 || arch == LLM_ARCH_SDXL) { return img_tensor_get_type(qs, new_type, tensor, ftype); };
      const auto       tn = LLM_TN(arch);
  
      auto use_more_bits = [](int i_layer, int n_layers) -> bool {
