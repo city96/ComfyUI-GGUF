@@ -15,11 +15,9 @@ python convert.py --src E:\models\unet\flux1-dev.safetensors
 To quantize the model, first apply the provided patch to the llama.cpp repo you've just cloned. If you get a "corrupt patch" error, you may have to [change the line endings in the patch file](https://github.com/city96/ComfyUI-GGUF/issues/90#issuecomment-2323011648).
 ```
 cd llama.cpp
-git checkout tags/b3600
+git checkout tags/b3962
 git apply ..\lcpp.patch
 ```
-
-If you wish to quantize **SD3** or **AuraFlow** models, you should use the patch named `lcpp_sd3.patch`, which has slightly modified logic for quantizing. For this you'll want to target `tags/b3962` instead.
 
 
 Then, compile the llama-quantize binary. This example uses cmake, on linux you can just use make.
@@ -40,6 +38,9 @@ llama.cpp\build\bin\Debug\llama-quantize.exe E:\models\unet\flux1-dev-BF16.gguf 
 
 
 You can extract the patch again with `git diff src\llama.cpp > lcpp.patch` if you wish to change something and contribute back.
+
+> [!WARNING] 
+>For hunyuan video, you will have to uncomment the block in convert.py that deals with 5D tensors. This will save a **non functional** model to disk first, that you can quantize. After quantization, run `fix_5d_tensor.py` to add back the missing key that was saved by the conversion code. You will have to edit this file to set the correct paths/architecture. This may change in the future.
 
 
 > [!WARNING]  

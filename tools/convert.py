@@ -45,6 +45,24 @@ class ModelAura(ModelTemplate):
     ]
     keys_banned = ["joint_transformer_blocks.3.ff_context.out_projection.weight",]
 
+class ModelHyVid(ModelTemplate):
+    arch = "hyvid"
+    keys_detect = [
+        (
+            "double_blocks.0.img_attn_proj.weight",
+            "txt_in.individual_token_refiner.blocks.1.self_attn_qkv.weight",
+        )
+    ]
+
+    # def handle_nd_tensor(self, key, data):
+    #     # hacky but this is the only arch that uses it
+    #     path = f"./fix_5d_tensors_{self.arch}.pt"
+    #     if os.path.isfile(path):
+    #         raise RuntimeError(f"5D tensor fix file already exists! {path}")
+    #     fsd = {key: data}
+    #     tqdm.write(f"5D key found in state dict! Manual fix required! - {key} {data.shape}")
+    #     torch.save(fsd, path)
+
 class ModelLTXV(ModelTemplate):
     arch = "ltxv"
     keys_detect = [
@@ -79,7 +97,7 @@ class ModelSD1(ModelTemplate):
     ]
 
 # The architectures are checked in order and the first successful match terminates the search.
-arch_list = [ModelFlux, ModelSD3, ModelAura, ModelLTXV,  ModelSDXL, ModelSD1]
+arch_list = [ModelFlux, ModelSD3, ModelAura, ModelLTXV, ModelHyVid, ModelSDXL, ModelSD1]
 
 def is_model_arch(model, state_dict):
     # check if model is correct
