@@ -7,7 +7,7 @@ python fix_lines_ending.py
 ```
 ## STEP 2 (Clone llama.cpp version of gguf-py)
 
-This needs the llama.cpp version of gguf-py to work at the moment, not the pip one as that one does not have the python quantization code yet.
+Git clone llama.cpp into the current folder. You may also install gguf-py from the llama.cpp repo directly, though the one specified in `requirements.txt` should also work on recent versions.
 
 ```
 git clone https://github.com/ggerganov/llama.cpp
@@ -29,7 +29,8 @@ git checkout tags/b3600
 git apply ..\lcpp.patch
 ```
 
-- To quantize **SD3** or **AuraFlow** models, you should use the patch  `lcpp_sd3.patch` and target to `tags/b3962` instead.
+- To quantize **SD3** or **AuraFlow** models, you should use the patch  `lcpp_sd3.patch` and target `tags/b3962` instead.
+- There is a [WIP PR for other model architectures](https://github.com/city96/ComfyUI-GGUF/pull/216)
 ```
 cd llama.cpp
 git checkout tags/b3962
