@@ -55,13 +55,23 @@ class ModelHyVid(ModelTemplate):
     ]
 
     # def handle_nd_tensor(self, key, data):
-    #     # hacky but this is the only arch that uses it
+    #     # hacky but don't have any better ideas
     #     path = f"./fix_5d_tensors_{self.arch}.pt"
     #     if os.path.isfile(path):
     #         raise RuntimeError(f"5D tensor fix file already exists! {path}")
     #     fsd = {key: data}
     #     tqdm.write(f"5D key found in state dict! Manual fix required! - {key} {data.shape}")
     #     torch.save(fsd, path)
+
+class ModelWan(ModelHyVid):
+    arch = "wan"
+    keys_detect = [
+        (
+            "blocks.0.self_attn.norm_q.weight",
+            "text_embedding.2.weight",
+            "head.modulation",
+        )
+    ]
 
 class ModelLTXV(ModelTemplate):
     arch = "ltxv"
@@ -97,7 +107,7 @@ class ModelSD1(ModelTemplate):
     ]
 
 # The architectures are checked in order and the first successful match terminates the search.
-arch_list = [ModelFlux, ModelSD3, ModelAura, ModelLTXV, ModelHyVid, ModelSDXL, ModelSD1]
+arch_list = [ModelFlux, ModelSD3, ModelAura, ModelLTXV, ModelHyVid, ModelWan, ModelSDXL, ModelSD1]
 
 def is_model_arch(model, state_dict):
     # check if model is correct
