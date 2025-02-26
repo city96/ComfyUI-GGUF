@@ -2,6 +2,8 @@
 import torch
 import logging
 import collections
+import hashlib
+from functools import lru_cache
 
 import comfy.sd
 import comfy.utils
@@ -125,10 +127,20 @@ class UnetLoaderGGUF:
             }
         }
 
-    RETURN_TYPES = ("MODEL",)
+    RETURN_TYPES = ("MODEL", "STRING", "STRING")
+    RETURN_NAMES = ("MODEL", "filename", "sha256")
     FUNCTION = "load_unet"
     CATEGORY = "bootleg"
     TITLE = "Unet Loader (GGUF)"
+
+    @staticmethod
+    @lru_cache(maxsize=None)
+    def hash_file(file_path):
+        hash_func = hashlib.sha256()
+        with open(file_path, "rb") as file:
+            while chunk := file.read(256 * 1024):
+                hash_func.update(chunk)
+        return hash_func.hexdigest()
 
     def load_unet(self, unet_name, dequant_dtype=None, patch_dtype=None, patch_on_device=None):
         ops = GGMLOps()
@@ -158,7 +170,11 @@ class UnetLoaderGGUF:
             raise RuntimeError("ERROR: Could not detect model type of: {}".format(unet_path))
         model = GGUFModelPatcher.clone(model)
         model.patch_on_device = patch_on_device
-        return (model,)
+
+        hash = self.hash_file(unet_path)
+
+        return (model, unet_name, hash)
+
 
 class UnetLoaderGGUFAdvanced(UnetLoaderGGUF):
     @classmethod
