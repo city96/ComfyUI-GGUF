@@ -10,12 +10,16 @@ from safetensors.torch import load_file
 QUANTIZATION_THRESHOLD = 1024
 REARRANGE_THRESHOLD = 512
 MAX_TENSOR_NAME_LENGTH = 127
+MAX_TENSOR_DIMS = 4
 
 class ModelTemplate:
     arch = "invalid"  # string describing architecture
     shape_fix = False # whether to reshape tensors
     keys_detect = []  # list of lists to match in state dict
     keys_banned = []  # list of keys that should mark model as invalid for conversion
+
+    def handle_nd_tensor(self, key, data):
+        raise NotImplementedError(f"Tensor detected that exceeds dims supported by C++ code! ({key} @ {data.shape})")
 
 class ModelFlux(ModelTemplate):
     arch = "flux"
@@ -40,6 +44,34 @@ class ModelAura(ModelTemplate):
         ("joint_transformer_blocks.3.ff_context.out_projection.weight",),
     ]
     keys_banned = ["joint_transformer_blocks.3.ff_context.out_projection.weight",]
+
+class ModelHyVid(ModelTemplate):
+    arch = "hyvid"
+    keys_detect = [
+        (
+            "double_blocks.0.img_attn_proj.weight",
+            "txt_in.individual_token_refiner.blocks.1.self_attn_qkv.weight",
+        )
+    ]
+
+    # def handle_nd_tensor(self, key, data):
+    #     # hacky but don't have any better ideas
+    #     path = f"./fix_5d_tensors_{self.arch}.pt"
+    #     if os.path.isfile(path):
+    #         raise RuntimeError(f"5D tensor fix file already exists! {path}")
+    #     fsd = {key: data}
+    #     tqdm.write(f"5D key found in state dict! Manual fix required! - {key} {data.shape}")
+    #     torch.save(fsd, path)
+
+class ModelWan(ModelHyVid):
+    arch = "wan"
+    keys_detect = [
+        (
+            "blocks.0.self_attn.norm_q.weight",
+            "text_embedding.2.weight",
+            "head.modulation",
+        )
+    ]
 
 class ModelLTXV(ModelTemplate):
     arch = "ltxv"
@@ -75,7 +107,7 @@ class ModelSD1(ModelTemplate):
     ]
 
 # The architectures are checked in order and the first successful match terminates the search.
-arch_list = [ModelFlux, ModelSD3, ModelAura, ModelLTXV,  ModelSDXL, ModelSD1]
+arch_list = [ModelFlux, ModelSD3, ModelAura, ModelLTXV, ModelHyVid, ModelWan, ModelSDXL, ModelSD1]
 
 def is_model_arch(model, state_dict):
     # check if model is correct
@@ -93,7 +125,7 @@ def detect_arch(state_dict):
     model_arch = None
     for arch in arch_list:
         if is_model_arch(arch, state_dict):
-            model_arch = arch
+            model_arch = arch()
             break
     assert model_arch is not None, "Unknown model architecture!"
     return model_arch
@@ -113,6 +145,8 @@ def load_state_dict(path):
     if any(path.endswith(x) for x in [".ckpt", ".pt", ".bin", ".pth"]):
         state_dict = torch.load(path, map_location="cpu", weights_only=True)
         state_dict = state_dict.get("model", state_dict)
+        if len(state_dict) < 20:
+            raise RuntimeError(f"pt subkey load failed: {state_dict.keys()}")
     else:
         state_dict = load_file(path)
 
@@ -140,7 +174,7 @@ def load_model(path):
     writer = gguf.GGUFWriter(path=None, arch=model_arch.arch)
     return (writer, state_dict, model_arch)
 
-def handle_tensors(args, writer, state_dict, model_arch):
+def handle_tensors(writer, state_dict, model_arch):
     name_lengths = tuple(sorted(
         ((key, len(key)) for key in state_dict.keys()),
         key=lambda item: item[1],
@@ -170,22 +204,15 @@ def handle_tensors(args, writer, state_dict, model_arch):
             "BF16" if old_dtype == torch.bfloat16 else "F16"
         )
 
+        # The max no. of dimensions that can be handled by the quantization code is 4
+        if len(data.shape) > MAX_TENSOR_DIMS:
+            model_arch.handle_nd_tensor(key, data)
+            continue # needs to be added back later
+
         # get number of parameters (AKA elements) in this tensor
         n_params = 1
         for dim_size in data_shape:
             n_params *= dim_size
-
-        # keys to keep as max precision
-        blacklist = {
-            "time_embedding.",
-            "add_embedding.",
-            "time_in.",
-            "txt_in.",
-            "vector_in.",
-            "img_in.",
-            "guidance_in.",
-            "final_layer.",
-        }
 
         if old_dtype in (torch.float32, torch.bfloat16):
             if n_dims == 1:
@@ -195,9 +222,6 @@ def handle_tensors(args, writer, state_dict, model_arch):
 
             elif n_params <= QUANTIZATION_THRESHOLD:
                 # very small tensors
-                data_qtype = gguf.GGMLQuantizationType.F32
-
-            elif ".weight" in key and any(x in key for x in blacklist):
                 data_qtype = gguf.GGMLQuantizationType.F32
 
         if (model_arch.shape_fix                        # NEVER reshape for models such as flux
@@ -241,7 +265,7 @@ if __name__ == "__main__":
     if os.path.isfile(out_path):
         input("Output exists enter to continue or ctrl+c to abort!")
 
-    handle_tensors(path, writer, state_dict, model_arch)
+    handle_tensors(writer, state_dict, model_arch)
     writer.write_header_to_file(path=out_path)
     writer.write_kv_data_to_file()
     writer.write_tensors_to_file(progress=True)
