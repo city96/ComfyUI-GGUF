@@ -18,6 +18,41 @@ def get_orig_shape(reader, tensor_name):
         raise TypeError(f"Bad original shape metadata for {field_key}: Expected ARRAY of INT32, got {field.types}")
     return torch.Size(tuple(int(field.parts[part_idx][0]) for part_idx in field.data))
 
+def get_string_field(reader, field_name):
+    field = reader.get_field(field_name)
+    if field is None:
+        return None
+    if len(field.types) != 1 or field.types[0] != gguf.GGUFValueType.STRING:
+        raise TypeError(f"Bad type for GGUF general.architecture key: expected string, got {field.types!r}")
+    return str(field.parts[field.data[-1]], encoding="utf-8")
+
+def get_field(reader, field_name, field_type):
+    # TODO: merge with function above and add checking
+    field = reader.get_field(field_name)
+    if field is None:
+        return None
+    if field_type == int:
+        return int(field.parts[field.data[-1]])
+    elif field_type == float:
+        return float(field.parts[field.data[-1]])
+    elif field_type == bool:
+        return bool(field.parts[field.data[-1]])
+    else:
+        raise TypeError(f"Unknown field type {field_type}")
+
+def get_list_field(reader, field_name, field_type):
+    field = reader.get_field(field_name)
+    if field is None:
+        return None
+    if field_type == int:
+        return tuple(int(field.parts[part_idx][0]) for part_idx in field.data)
+    elif field_type == float:
+        return tuple(float(field.parts[part_idx][0]) for part_idx in field.data)
+    elif field_type == str:
+        return tuple(str(field.parts[part_idx], encoding="utf-8") for part_idx in field.data)
+    else:
+        raise TypeError(f"Unknown field type {field_type}")
+
 def gguf_sd_loader(path, handle_prefix="model.diffusion_model.", return_arch=False):
     """
     Read state dict as fake tensors
@@ -42,19 +77,14 @@ def gguf_sd_loader(path, handle_prefix="model.diffusion_model.", return_arch=Fal
 
     # detect and verify architecture
     compat = None
-    arch_str = None
-    arch_field = reader.get_field("general.architecture")
-    if arch_field is not None:
-        if len(arch_field.types) != 1 or arch_field.types[0] != gguf.GGUFValueType.STRING:
-            raise TypeError(f"Bad type for GGUF general.architecture key: expected string, got {arch_field.types!r}")
-        arch_str = str(arch_field.parts[arch_field.data[-1]], encoding="utf-8")
-        if arch_str not in IMG_ARCH_LIST and arch_str not in TXT_ARCH_LIST:
-            raise ValueError(f"Unexpected architecture type in GGUF file, expected one of flux, sd1, sdxl, t5encoder but got {arch_str!r}")
-    else: # stable-diffusion.cpp
+    arch_str = get_string_field(reader, "general.architecture")
+    if arch_str is None: # stable-diffusion.cpp
         # import here to avoid changes to convert.py breaking regular models
         from .tools.convert import detect_arch
         arch_str = detect_arch(set(val[0] for val in tensors)).arch
         compat = "sd.cpp"
+    elif arch_str not in IMG_ARCH_LIST and arch_str not in TXT_ARCH_LIST:
+        raise ValueError(f"Unexpected architecture type in GGUF file: {arch_str!r}")
 
     # main loading loop
     state_dict = {}
@@ -148,9 +178,58 @@ def llama_permute(raw_sd, n_head, n_head_kv):
         sd[k] = v
     return sd
 
+def gguf_tokenizer_loader(path, temb_shape):
+    # convert gguf tokenizer to spiece
+    print(f"Attempting to recreate sentencepiece tokenizer from GGUF file metadata...")
+    from sentencepiece import sentencepiece_model_pb2 as model
+    spm = model.ModelProto()
+
+    reader = gguf.GGUFReader(path)
+
+    if get_string_field(reader, "tokenizer.ggml.model") == "t5":
+        if temb_shape == (256384, 4096): # probably UMT5
+            spm.trainer_spec.model_type == 1 # Unigram (do we have a T5 w/ BPE?)
+        else:
+            raise NotImplementedError(f"Unknown model, can't set tokenizer!")
+    else:
+        raise NotImplementedError(f"Unknown model, can't set tokenizer!")
+
+    spm.normalizer_spec.add_dummy_prefix = get_field(reader, "tokenizer.ggml.add_space_prefix", bool)
+    spm.normalizer_spec.remove_extra_whitespaces = get_field(reader, "tokenizer.ggml.remove_extra_whitespaces", bool)
+
+    tokens = get_list_field(reader, "tokenizer.ggml.tokens", str)
+    scores = get_list_field(reader, "tokenizer.ggml.scores", float)
+    toktypes = get_list_field(reader, "tokenizer.ggml.token_type", int)
+
+    for idx, (token, score, toktype) in enumerate(zip(tokens, scores, toktypes)):
+        # # These aren't present in the original?
+        # if toktype == 5 and idx >= temb_shape[0]%1000):
+        #     continue
+
+        piece = spm.SentencePiece()
+        piece.piece = token
+        piece.score = score
+        piece.type = toktype
+        spm.pieces.append(piece)
+
+    # unsure if any of these are correct
+    spm.trainer_spec.byte_fallback = True
+    spm.trainer_spec.vocab_size = len(tokens) # split off unused?
+    spm.trainer_spec.max_sentence_length = 4096
+    spm.trainer_spec.eos_id = get_field(reader, "tokenizer.ggml.eos_token_id", int)
+    spm.trainer_spec.pad_id = get_field(reader, "tokenizer.ggml.padding_token_id", int)
+
+    print(f"Created tokenizer with vocab size of {len(spm.pieces)}")
+    del reader
+    return torch.ByteTensor(list(spm.SerializeToString()))
+
 def gguf_clip_loader(path):
     sd, arch = gguf_sd_loader(path, return_arch=True)
     if arch in {"t5", "t5encoder"}:
+        temb_key = "token_embd.weight"
+        if temb_key in sd and sd[temb_key].shape == (256384, 4096):
+            # non-standard Comfy-Org tokenizer
+            sd["spiece_model"] = gguf_tokenizer_loader(path, sd[temb_key].shape)
         sd = sd_map_replace(sd, T5_SD_MAP)
     elif arch in {"llama"}:
         temb_key = "token_embd.weight"
