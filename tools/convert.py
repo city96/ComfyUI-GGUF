@@ -17,6 +17,7 @@ class ModelTemplate:
     shape_fix = False # whether to reshape tensors
     keys_detect = []  # list of lists to match in state dict
     keys_banned = []  # list of keys that should mark model as invalid for conversion
+    keys_hiprec = []  # list of keys that need to be kept in fp32 for some reason
 
     def handle_nd_tensor(self, key, data):
         raise NotImplementedError(f"Tensor detected that exceeds dims supported by C++ code! ({key} @ {data.shape})")
@@ -81,6 +82,9 @@ class ModelLTXV(ModelTemplate):
             "transformer_blocks.27.scale_shift_table",
             "caption_projection.linear_2.weight",
         )
+    ]
+    keys_hiprec = [
+        "scale_shift_table" # nn.parameter, can't load from BF16 base quant
     ]
 
 class ModelSDXL(ModelTemplate):
@@ -225,6 +229,10 @@ def handle_tensors(writer, state_dict, model_arch):
 
             elif n_params <= QUANTIZATION_THRESHOLD:
                 # very small tensors
+                data_qtype = gguf.GGMLQuantizationType.F32
+
+            elif any(x in key for x in model_arch.keys_hiprec):
+                # tensors that require max precision
                 data_qtype = gguf.GGMLQuantizationType.F32
 
         if (model_arch.shape_fix                        # NEVER reshape for models such as flux
