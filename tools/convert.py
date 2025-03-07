@@ -144,7 +144,10 @@ def parse_args():
 def load_state_dict(path):
     if any(path.endswith(x) for x in [".ckpt", ".pt", ".bin", ".pth"]):
         state_dict = torch.load(path, map_location="cpu", weights_only=True)
-        state_dict = state_dict.get("model", state_dict)
+        for subkey in ["model", "module"]:
+            if subkey in state_dict:
+                state_dict = state_dict[subkey]
+                break
         if len(state_dict) < 20:
             raise RuntimeError(f"pt subkey load failed: {state_dict.keys()}")
     else:
