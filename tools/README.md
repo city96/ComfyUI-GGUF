@@ -25,7 +25,7 @@ python convert.py --src E:\models\unet\flux1-dev.safetensors
 - To quantize the model, first apply the provided patch to the llama.cpp repo you've just cloned.
 ```
 cd llama.cpp
-git checkout tags/b3600
+git checkout tags/b3962
 git apply ..\lcpp.patch
 ```
 
@@ -58,6 +58,9 @@ llama.cpp\build\bin\Debug\llama-quantize.exe E:\models\unet\flux1-dev-BF16.gguf 
 
 
 You can extract the patch again with `git diff src\llama.cpp > lcpp.patch` if you wish to change something and contribute back.
+
+> [!WARNING] 
+>For hunyuan video, you will have to uncomment the block in convert.py that deals with 5D tensors. This will save a **non functional** model to disk first, that you can quantize. After quantization, run `fix_5d_tensor.py` to add back the missing key that was saved by the conversion code. You will have to edit this file to set the correct paths/architecture. This may change in the future.
 
 
 > [!WARNING]  
