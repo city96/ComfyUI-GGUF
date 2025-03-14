@@ -18,25 +18,17 @@ def get_orig_shape(reader, tensor_name):
         raise TypeError(f"Bad original shape metadata for {field_key}: Expected ARRAY of INT32, got {field.types}")
     return torch.Size(tuple(int(field.parts[part_idx][0]) for part_idx in field.data))
 
-def get_string_field(reader, field_name):
-    field = reader.get_field(field_name)
-    if field is None:
-        return None
-    if len(field.types) != 1 or field.types[0] != gguf.GGUFValueType.STRING:
-        raise TypeError(f"Bad type for GGUF general.architecture key: expected string, got {field.types!r}")
-    return str(field.parts[field.data[-1]], encoding="utf-8")
-
 def get_field(reader, field_name, field_type):
-    # TODO: merge with function above and add checking
     field = reader.get_field(field_name)
     if field is None:
         return None
-    if field_type == int:
-        return int(field.parts[field.data[-1]])
-    elif field_type == float:
-        return float(field.parts[field.data[-1]])
-    elif field_type == bool:
-        return bool(field.parts[field.data[-1]])
+    elif field_type == str:
+        # extra check here as this is used for checking arch string
+        if len(field.types) != 1 or field.types[0] != gguf.GGUFValueType.STRING:
+            raise TypeError(f"Bad type for GGUF {field_name} key: expected string, got {field.types!r}")
+        return str(field.parts[field.data[-1]], encoding="utf-8")
+    elif field_type in [int, float, bool]:
+        return field_type(field.parts[field.data[-1]])
     else:
         raise TypeError(f"Unknown field type {field_type}")
 
@@ -44,12 +36,10 @@ def get_list_field(reader, field_name, field_type):
     field = reader.get_field(field_name)
     if field is None:
         return None
-    if field_type == int:
-        return tuple(int(field.parts[part_idx][0]) for part_idx in field.data)
-    elif field_type == float:
-        return tuple(float(field.parts[part_idx][0]) for part_idx in field.data)
     elif field_type == str:
         return tuple(str(field.parts[part_idx], encoding="utf-8") for part_idx in field.data)
+    elif field_type in [int, float, bool]:
+        return tuple(field_type(field.parts[part_idx][0]) for part_idx in field.data)
     else:
         raise TypeError(f"Unknown field type {field_type}")
 
@@ -77,7 +67,7 @@ def gguf_sd_loader(path, handle_prefix="model.diffusion_model.", return_arch=Fal
 
     # detect and verify architecture
     compat = None
-    arch_str = get_string_field(reader, "general.architecture")
+    arch_str = get_field(reader, "general.architecture", str)
     if arch_str is None: # stable-diffusion.cpp
         # import here to avoid changes to convert.py breaking regular models
         from .tools.convert import detect_arch
@@ -186,7 +176,7 @@ def gguf_tokenizer_loader(path, temb_shape):
 
     reader = gguf.GGUFReader(path)
 
-    if get_string_field(reader, "tokenizer.ggml.model") == "t5":
+    if get_field(reader, "tokenizer.ggml.model", str) == "t5":
         if temb_shape == (256384, 4096): # probably UMT5
             spm.trainer_spec.model_type == 1 # Unigram (do we have a T5 w/ BPE?)
         else:
