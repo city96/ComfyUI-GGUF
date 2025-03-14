@@ -3,7 +3,7 @@ import torch
 import gguf
 
 from .ops import GGMLTensor
-from .dequant import is_quantized
+from .dequant import is_quantized, dequantize_tensor
 
 IMG_ARCH_LIST = {"flux", "sd1", "sdxl", "sd3", "aura", "ltxv", "hyvid", "wan"}
 TXT_ARCH_LIST = {"t5", "t5encoder", "llama"}
@@ -230,6 +230,9 @@ def gguf_clip_loader(path):
         if temb_key in sd and sd[temb_key].shape == (256384, 4096):
             # non-standard Comfy-Org tokenizer
             sd["spiece_model"] = gguf_tokenizer_loader(path, sd[temb_key].shape)
+            # TODO: dequantizing token embed here is janky but otherwise we OOM due to tensor being massive.
+            print(f"Dequantizing {temb_key} to prevent runtime OOM.")
+            sd[temb_key] = dequantize_tensor(sd[temb_key], dtype=torch.float16)
         sd = sd_map_replace(sd, T5_SD_MAP)
     elif arch in {"llama"}:
         temb_key = "token_embd.weight"
