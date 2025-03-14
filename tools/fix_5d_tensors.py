@@ -2,10 +2,16 @@ import gguf
 import torch
 from tqdm import tqdm
 
+import argparse
+parser = argparse.ArgumentParser()
+parser.add_argument("prec")
+parser.add_argument("--root")
+args = parser.parse_args()
+
 arch = "hyvid" # TODO: Really should autodetect this
-prec = "Q4_K_S" # edit manually for each step
-src = fr"raw/hunyuan-video-t2v-720p-{prec}.gguf"
-dst = fr"hunyuan-video-t2v-720p-{prec}.gguf"
+prec = args.prec #"Q4_K_S" # edit manually for each step
+src = fr"{args.root}/raw/hunyuan-video-t2v-720p-{prec}.gguf"
+dst = fr"{args.root}/hunyuan-video-t2v-720p-{prec}.gguf"
 
 sd5d = torch.load(f"./fix_5d_tensors_{arch}.pt")
 print("5D:", sd5d.keys())
