@@ -171,7 +171,10 @@ def llama_permute(raw_sd, n_head, n_head_kv):
 def gguf_tokenizer_loader(path, temb_shape):
     # convert gguf tokenizer to spiece
     print(f"Attempting to recreate sentencepiece tokenizer from GGUF file metadata...")
-    from sentencepiece import sentencepiece_model_pb2 as model
+    try:
+        from sentencepiece import sentencepiece_model_pb2 as model
+    except ImportError:
+        raise ImportError("Please make sure sentencepiece and protobuf are installed.\npip install sentencepiece protobuf")
     spm = model.ModelProto()
 
     reader = gguf.GGUFReader(path)
