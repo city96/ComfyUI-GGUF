@@ -186,6 +186,7 @@ CLIP_ENUM_MAP = {
     "ltxv":             "LTXV",
     "hunyuan_video":    "HUNYUAN_VIDEO",
     "pixart":           "PIXART",
+    "wan":              "WAN",
 }
 
 def get_clip_type(name):
@@ -203,7 +204,7 @@ class CLIPLoaderGGUF:
         return {
             "required": {
                 "clip_name": (s.get_filename_list(),),
-                "type": (["stable_diffusion", "stable_cascade", "sd3", "stable_audio", "mochi", "ltxv", "pixart"],),
+                "type": (["stable_diffusion", "stable_cascade", "sd3", "stable_audio", "mochi", "ltxv", "pixart", "wan"],),
             }
         }
 
