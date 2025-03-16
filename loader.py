@@ -88,7 +88,6 @@ def gguf_sd_loader(path, handle_prefix="model.diffusion_model.", return_arch=Fal
     qtype_dict = {}
     for sd_key, tensor in tensors:
         tensor_name = tensor.name
-        tensor_type_str = str(tensor.tensor_type)
         torch_tensor = torch.from_numpy(tensor.data) # mmap
 
         shape = get_orig_shape(reader, tensor_name)
@@ -104,18 +103,19 @@ def gguf_sd_loader(path, handle_prefix="model.diffusion_model.", return_arch=Fal
         if tensor.tensor_type in {gguf.GGMLQuantizationType.F32, gguf.GGMLQuantizationType.F16}:
             torch_tensor = torch_tensor.view(*shape)
         state_dict[sd_key] = GGMLTensor(torch_tensor, tensor_type=tensor.tensor_type, tensor_shape=shape)
+
+        # keep track of loaded tensor types
+        tensor_type_str = getattr(tensor.tensor_type, "name", repr(tensor.tensor_type))
         qtype_dict[tensor_type_str] = qtype_dict.get(tensor_type_str, 0) + 1
+
+    # print loaded tensor type counts
+    print("gguf qtypes: " + ", ".join(f"{k} ({v})" for k, v in qtype_dict.items()))
 
     # mark largest tensor for vram estimation
     qsd = {k:v for k,v in state_dict.items() if is_quantized(v)}
     if len(qsd) > 0:
         max_key = max(qsd.keys(), key=lambda k: qsd[k].numel())
         state_dict[max_key].is_largest_weight = True
-
-    # sanity check debug print
-    print("\nggml_sd_loader:")
-    for k,v in qtype_dict.items():
-        print(f" {k:30}{v:3}")
 
     if return_arch:
         return (state_dict, arch_str)
