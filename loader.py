@@ -73,8 +73,15 @@ def gguf_sd_loader(path, handle_prefix="model.diffusion_model.", return_arch=Fal
         from .tools.convert import detect_arch
         arch_str = detect_arch(set(val[0] for val in tensors)).arch
         compat = "sd.cpp"
+    elif arch_str in ["pig"]:
+        from .tools.convert import detect_arch
+        arch_str = detect_arch(set(val[0] for val in tensors)).arch
+        compat = "pig"
     elif arch_str not in IMG_ARCH_LIST and arch_str not in TXT_ARCH_LIST:
         raise ValueError(f"Unexpected architecture type in GGUF file: {arch_str!r}")
+
+    if compat:
+        print(f"Warning: This model file is loaded in compatibility mode '{compat}' [arch:{arch_str}]")
 
     # main loading loop
     state_dict = {}
