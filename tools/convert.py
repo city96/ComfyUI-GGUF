@@ -145,18 +145,7 @@ def parse_args():
 
     return args
 
-def load_state_dict(path):
-    if any(path.endswith(x) for x in [".ckpt", ".pt", ".bin", ".pth"]):
-        state_dict = torch.load(path, map_location="cpu", weights_only=True)
-        for subkey in ["model", "module"]:
-            if subkey in state_dict:
-                state_dict = state_dict[subkey]
-                break
-        if len(state_dict) < 20:
-            raise RuntimeError(f"pt subkey load failed: {state_dict.keys()}")
-    else:
-        state_dict = load_file(path)
-
+def strip_prefix(state_dict):
     # only keep unet with no prefix!
     prefix = None
     for pfx in ["model.diffusion_model.", "model."]:
@@ -173,6 +162,20 @@ def load_state_dict(path):
         sd[k] = v
 
     return sd
+
+def load_state_dict(path):
+    if any(path.endswith(x) for x in [".ckpt", ".pt", ".bin", ".pth"]):
+        state_dict = torch.load(path, map_location="cpu", weights_only=True)
+        for subkey in ["model", "module"]:
+            if subkey in state_dict:
+                state_dict = state_dict[subkey]
+                break
+        if len(state_dict) < 20:
+            raise RuntimeError(f"pt subkey load failed: {state_dict.keys()}")
+    else:
+        state_dict = load_file(path)
+
+    return strip_prefix(state_dict)
 
 def load_model(path):
     state_dict = load_state_dict(path)
