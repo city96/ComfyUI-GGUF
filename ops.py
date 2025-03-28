@@ -6,8 +6,10 @@ import comfy.ops
 import comfy.model_management
 from .dequant import dequantize_tensor, is_quantized
 
-# to avoid breaking really old pytorch versions
-if hasattr(torch, "compiler") and hasattr(torch.compiler, "disable"):
+# to avoid breaking really old pytorch version, and avoid graph-breaking really
+# new pytorch version. TODO figure it out, do we have to wait till next release?
+before_torch_gguf_tensor_subclass_support = False
+if hasattr(torch, "compiler") and hasattr(torch.compiler, "disable") and before_torch_gguf_tensor_subclass_support:
     torch_compiler_disable = torch.compiler.disable
 else:
     def torch_compiler_disable(*args, **kwargs):
@@ -149,7 +151,7 @@ class GGMLLayer(torch.nn.Module):
 
         # prevent propagating custom tensor class
         if isinstance(weight, GGMLTensor):
-            weight.__class__ = torch.Tensor
+            weight = torch.Tensor(weight)
 
         # apply patches
         if patch_list:
@@ -189,7 +191,7 @@ class GGMLLayer(torch.nn.Module):
 
         # non-ggml forward might still propagate custom tensor class
         if isinstance(out, GGMLTensor):
-            out.__class__ = torch.Tensor
+            out = torch.Tensor(out)
         return out
 
     def forward_ggml_cast_weights(self, input):
