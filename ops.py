@@ -6,14 +6,34 @@ import comfy.ops
 import comfy.model_management
 from .dequant import dequantize_tensor, is_quantized
 
-# to avoid breaking really old pytorch versions
-if hasattr(torch, "compiler") and hasattr(torch.compiler, "disable"):
-    torch_compiler_disable = torch.compiler.disable
-else:
-    def torch_compiler_disable(*args, **kwargs):
+def chained_hasattr(obj, chained_attr):
+    probe = obj
+    for attr in chained_attr.split('.'):
+        if hasattr(probe, attr):
+            probe = getattr(probe, attr)
+        else:
+            return False
+    return True
+
+# A bakcward and forward compatible way to get `torch.compiler.disable`.
+def get_torch_compiler_disable_decorator():
+    def dummy_decorator(*args, **kwargs):
         def noop(x):
             return x
         return noop
+
+    from packaging import version
+
+    if not chained_hasattr(torch, "compiler.disable"):
+        return dummy_decorator # torch too old
+    elif version.parse(torch.__version__) >= version.parse("2.8"):
+        return dummy_decorator # torch compile works
+    if chained_hasattr(torch, "_dynamo.config.nontraceable_tensor_subclasses"):
+        return dummy_decorator # torch compile works, nightly before 2.8 release
+    else:
+        return torch.compiler.disable
+
+torch_compiler_disable = get_torch_compiler_disable_decorator()
 
 class GGMLTensor(torch.Tensor):
     """
@@ -149,7 +169,7 @@ class GGMLLayer(torch.nn.Module):
 
         # prevent propagating custom tensor class
         if isinstance(weight, GGMLTensor):
-            weight.__class__ = torch.Tensor
+            weight = torch.Tensor(weight)
 
         # apply patches
         if patch_list:
@@ -189,7 +209,7 @@ class GGMLLayer(torch.nn.Module):
 
         # non-ggml forward might still propagate custom tensor class
         if isinstance(out, GGMLTensor):
-            out.__class__ = torch.Tensor
+            out = torch.Tensor(out)
         return out
 
     def forward_ggml_cast_weights(self, input):
