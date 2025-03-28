@@ -73,6 +73,9 @@ class ModelWan(ModelHyVid):
             "head.modulation",
         )
     ]
+    keys_hiprec = [
+        ".modulation" # nn.parameter, can't load from BF16 ver
+    ]
 
 class ModelLTXV(ModelTemplate):
     arch = "ltxv"
