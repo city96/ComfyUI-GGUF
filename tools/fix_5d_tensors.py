@@ -1,8 +1,10 @@
+# (c) City96 || Apache-2.0 (apache.org/licenses/LICENSE-2.0)
 import os
 import gguf
 import torch
 import argparse
 from tqdm import tqdm
+from safetensors.torch import load_file
 
 def get_args():
     parser = argparse.ArgumentParser()
@@ -39,12 +41,13 @@ if __name__ == "__main__":
 
     # prep fix
     if args.fix is None:
-        args.fix = f"./fix_5d_tensors_{arch}.pt"
+        args.fix = f"./fix_5d_tensors_{arch}.safetensors"
  
     if not os.path.isfile(args.fix):
         raise OSError(f"No 5D tensor fix file: {args.fix}")
 
-    sd5d = torch.load(args.fix)
+    sd5d = load_file(args.fix)
+    sd5d = {k:v.numpy() for k,v in sd5d.items()}
     print("5D tensors:", sd5d.keys())
 
     # prep output
