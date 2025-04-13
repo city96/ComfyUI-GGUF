@@ -99,7 +99,7 @@ class GGUFModelPatcher(comfy.model_patcher.ModelPatcher):
                             linked.append((n, m))
                             continue
             if linked:
-                print(f"Attempting to release mmap ({len(linked)})")
+                logging.info(f"Attempting to release mmap ({len(linked)})")
                 for n, m in linked:
                     # TODO: possible to OOM, find better way to detach
                     m.to(self.load_device).to(self.offload_device)
@@ -192,7 +192,7 @@ CLIP_ENUM_MAP = {
 def get_clip_type(name):
     enum_name = CLIP_ENUM_MAP.get(name, None)
     if enum_name is None:
-        raise ValueError(f"Unknown CLIP model type {name}") 
+        raise ValueError(f"Unknown CLIP model type {name}")
     clip_type = getattr(comfy.sd.CLIPType, CLIP_ENUM_MAP[name], None)
     if clip_type is None:
         raise ValueError(f"Unsupported CLIP model type {name} (Update ComfyUI)")

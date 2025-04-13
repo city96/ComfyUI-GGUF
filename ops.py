@@ -1,6 +1,7 @@
 # (c) City96 || Apache-2.0 (apache.org/licenses/LICENSE-2.0)
 import gguf
 import torch
+import logging
 
 import comfy.ops
 import comfy.model_management
@@ -25,12 +26,16 @@ def get_torch_compiler_disable_decorator():
     from packaging import version
 
     if not chained_hasattr(torch, "compiler.disable"):
+        logging.info("ComfyUI-GGUF: Torch too old for torch.compile - bypassing")
         return dummy_decorator # torch too old
     elif version.parse(torch.__version__) >= version.parse("2.8"):
+        logging.info("ComfyUI-GGUF: Allowing full torch compile")
         return dummy_decorator # torch compile works
     if chained_hasattr(torch, "_dynamo.config.nontraceable_tensor_subclasses"):
+        logging.info("ComfyUI-GGUF: Allowing full torch compile (nightly)")
         return dummy_decorator # torch compile works, nightly before 2.8 release
     else:
+        logging.info("ComfyUI-GGUF: Partial torch compile only, consider updating pytorch")
         return torch.compiler.disable
 
 torch_compiler_disable = get_torch_compiler_disable_decorator()
@@ -66,7 +71,7 @@ class GGMLTensor(torch.Tensor):
         try:
             return super().copy_(*args, **kwargs)
         except Exception as e:
-            print(f"ignoring 'copy_' on tensor: {e}")
+            logging.warning(f"ignoring 'copy_' on tensor: {e}")
 
     def new_empty(self, size, *args, **kwargs):
         # Intel Arc fix, ref#50
@@ -103,7 +108,7 @@ class GGMLLayer(torch.nn.Module):
 
     def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
         weight, bias = state_dict.get(f"{prefix}weight"), state_dict.get(f"{prefix}bias")
-        # NOTE: using modified load for linear due to not initializing on creation, see GGMLOps todo 
+        # NOTE: using modified load for linear due to not initializing on creation, see GGMLOps todo
         if self.is_ggml_quantized(weight=weight, bias=bias) or isinstance(self, torch.nn.Linear):
             return self.ggml_load_from_state_dict(state_dict, prefix, *args, **kwargs)
         return super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
