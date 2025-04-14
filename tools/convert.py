@@ -1,21 +1,25 @@
 # (c) City96 || Apache-2.0 (apache.org/licenses/LICENSE-2.0)
 import os
+import gguf
 import torch
-import gguf # This needs to be the llama.cpp one specifically!
 import argparse
 from tqdm import tqdm
-
-from safetensors.torch import load_file
+from safetensors.torch import load_file, save_file
 
 QUANTIZATION_THRESHOLD = 1024
 REARRANGE_THRESHOLD = 512
 MAX_TENSOR_NAME_LENGTH = 127
+MAX_TENSOR_DIMS = 4
 
 class ModelTemplate:
     arch = "invalid"  # string describing architecture
     shape_fix = False # whether to reshape tensors
     keys_detect = []  # list of lists to match in state dict
     keys_banned = []  # list of keys that should mark model as invalid for conversion
+    keys_hiprec = []  # list of keys that need to be kept in fp32 for some reason
+
+    def handle_nd_tensor(self, key, data):
+        raise NotImplementedError(f"Tensor detected that exceeds dims supported by C++ code! ({key} @ {data.shape})")
 
 class ModelFlux(ModelTemplate):
     arch = "flux"
@@ -41,6 +45,37 @@ class ModelAura(ModelTemplate):
     ]
     keys_banned = ["joint_transformer_blocks.3.ff_context.out_projection.weight",]
 
+class ModelHyVid(ModelTemplate):
+    arch = "hyvid"
+    keys_detect = [
+        (
+            "double_blocks.0.img_attn_proj.weight",
+            "txt_in.individual_token_refiner.blocks.1.self_attn_qkv.weight",
+        )
+    ]
+
+    def handle_nd_tensor(self, key, data):
+        # hacky but don't have any better ideas
+        path = f"./fix_5d_tensors_{self.arch}.safetensors" # TODO: somehow get a path here??
+        if os.path.isfile(path):
+            raise RuntimeError(f"5D tensor fix file already exists! {path}")
+        fsd = {key: torch.from_numpy(data)}
+        tqdm.write(f"5D key found in state dict! Manual fix required! - {key} {data.shape}")
+        save_file(fsd, path)
+
+class ModelWan(ModelHyVid):
+    arch = "wan"
+    keys_detect = [
+        (
+            "blocks.0.self_attn.norm_q.weight",
+            "text_embedding.2.weight",
+            "head.modulation",
+        )
+    ]
+    keys_hiprec = [
+        ".modulation" # nn.parameter, can't load from BF16 ver
+    ]
+
 class ModelLTXV(ModelTemplate):
     arch = "ltxv"
     keys_detect = [
@@ -49,6 +84,9 @@ class ModelLTXV(ModelTemplate):
             "transformer_blocks.27.scale_shift_table",
             "caption_projection.linear_2.weight",
         )
+    ]
+    keys_hiprec = [
+        "scale_shift_table" # nn.parameter, can't load from BF16 base quant
     ]
 
 class ModelSDXL(ModelTemplate):
@@ -75,7 +113,7 @@ class ModelSD1(ModelTemplate):
     ]
 
 # The architectures are checked in order and the first successful match terminates the search.
-arch_list = [ModelFlux, ModelSD3, ModelAura, ModelLTXV,  ModelSDXL, ModelSD1]
+arch_list = [ModelFlux, ModelSD3, ModelAura, ModelLTXV, ModelHyVid, ModelWan, ModelSDXL, ModelSD1]
 
 def is_model_arch(model, state_dict):
     # check if model is correct
@@ -93,7 +131,7 @@ def detect_arch(state_dict):
     model_arch = None
     for arch in arch_list:
         if is_model_arch(arch, state_dict):
-            model_arch = arch
+            model_arch = arch()
             break
     assert model_arch is not None, "Unknown model architecture!"
     return model_arch
@@ -109,13 +147,7 @@ def parse_args():
 
     return args
 
-def load_state_dict(path):
-    if any(path.endswith(x) for x in [".ckpt", ".pt", ".bin", ".pth"]):
-        state_dict = torch.load(path, map_location="cpu", weights_only=True)
-        state_dict = state_dict.get("model", state_dict)
-    else:
-        state_dict = load_file(path)
-
+def strip_prefix(state_dict):
     # only keep unet with no prefix!
     prefix = None
     for pfx in ["model.diffusion_model.", "model."]:
@@ -133,14 +165,21 @@ def load_state_dict(path):
 
     return sd
 
-def load_model(path):
-    state_dict = load_state_dict(path)
-    model_arch = detect_arch(state_dict)
-    print(f"* Architecture detected from input: {model_arch.arch}")
-    writer = gguf.GGUFWriter(path=None, arch=model_arch.arch)
-    return (writer, state_dict, model_arch)
+def load_state_dict(path):
+    if any(path.endswith(x) for x in [".ckpt", ".pt", ".bin", ".pth"]):
+        state_dict = torch.load(path, map_location="cpu", weights_only=True)
+        for subkey in ["model", "module"]:
+            if subkey in state_dict:
+                state_dict = state_dict[subkey]
+                break
+        if len(state_dict) < 20:
+            raise RuntimeError(f"pt subkey load failed: {state_dict.keys()}")
+    else:
+        state_dict = load_file(path)
 
-def handle_tensors(args, writer, state_dict, model_arch):
+    return strip_prefix(state_dict)
+
+def handle_tensors(writer, state_dict, model_arch):
     name_lengths = tuple(sorted(
         ((key, len(key)) for key in state_dict.keys()),
         key=lambda item: item[1],
@@ -165,27 +204,22 @@ def handle_tensors(args, writer, state_dict, model_arch):
 
         n_dims = len(data.shape)
         data_shape = data.shape
-        data_qtype = getattr(
-            gguf.GGMLQuantizationType,
-            "BF16" if old_dtype == torch.bfloat16 else "F16"
-        )
+        if old_dtype == torch.bfloat16:
+            data_qtype = gguf.GGMLQuantizationType.BF16
+        # elif old_dtype == torch.float32:
+        #     data_qtype = gguf.GGMLQuantizationType.F32
+        else:
+            data_qtype = gguf.GGMLQuantizationType.F16
+
+        # The max no. of dimensions that can be handled by the quantization code is 4
+        if len(data.shape) > MAX_TENSOR_DIMS:
+            model_arch.handle_nd_tensor(key, data)
+            continue # needs to be added back later
 
         # get number of parameters (AKA elements) in this tensor
         n_params = 1
         for dim_size in data_shape:
             n_params *= dim_size
-
-        # keys to keep as max precision
-        blacklist = {
-            "time_embedding.",
-            "add_embedding.",
-            "time_in.",
-            "txt_in.",
-            "vector_in.",
-            "img_in.",
-            "guidance_in.",
-            "final_layer.",
-        }
 
         if old_dtype in (torch.float32, torch.bfloat16):
             if n_dims == 1:
@@ -197,7 +231,8 @@ def handle_tensors(args, writer, state_dict, model_arch):
                 # very small tensors
                 data_qtype = gguf.GGMLQuantizationType.F32
 
-            elif ".weight" in key and any(x in key for x in blacklist):
+            elif any(x in key for x in model_arch.keys_hiprec):
+                # tensors that require max precision
                 data_qtype = gguf.GGMLQuantizationType.F32
 
         if (model_arch.shape_fix                        # NEVER reshape for models such as flux
@@ -224,25 +259,57 @@ def handle_tensors(args, writer, state_dict, model_arch):
 
         writer.add_tensor(new_name, data, raw_dtype=data_qtype)
 
-if __name__ == "__main__":
-    args = parse_args()
-    path = args.src
-    writer, state_dict, model_arch = load_model(path)
+def convert_file(path, dst_path=None, interact=True, overwrite=False):
+    # load & run model detection logic
+    state_dict = load_state_dict(path)
+    model_arch = detect_arch(state_dict)
+    print(f"* Architecture detected from input: {model_arch.arch}")
 
-    writer.add_quantization_version(gguf.GGML_QUANT_VERSION)
-    if next(iter(state_dict.values())).dtype == torch.bfloat16:
-        out_path = f"{os.path.splitext(path)[0]}-BF16.gguf"
-        writer.add_file_type(gguf.LlamaFileType.MOSTLY_BF16)
+    # detect & set dtype for output file
+    dtypes = [x.dtype for x in state_dict.values()]
+    dtypes = {x:dtypes.count(x) for x in set(dtypes)}
+    main_dtype = max(dtypes, key=dtypes.get)
+
+    if main_dtype == torch.bfloat16:
+        ftype_name = "BF16"
+        ftype_gguf = gguf.LlamaFileType.MOSTLY_BF16
+    # elif main_dtype == torch.float32:
+    #     ftype_name = "F32"
+    #     ftype_gguf = None
     else:
-        out_path = f"{os.path.splitext(path)[0]}-F16.gguf"
-        writer.add_file_type(gguf.LlamaFileType.MOSTLY_F16)
+        ftype_name = "F16"
+        ftype_gguf = gguf.LlamaFileType.MOSTLY_F16
 
-    out_path = args.dst or out_path
-    if os.path.isfile(out_path):
-        input("Output exists enter to continue or ctrl+c to abort!")
+    if dst_path is None:
+        dst_path = f"{os.path.splitext(path)[0]}-{ftype_name}.gguf"
+    elif "{ftype}" in dst_path: # lcpp logic
+        dst_path = dst_path.replace("{ftype}", ftype_name)
 
-    handle_tensors(path, writer, state_dict, model_arch)
-    writer.write_header_to_file(path=out_path)
+    if os.path.isfile(dst_path) and not overwrite:
+        if interact:
+            input("Output exists enter to continue or ctrl+c to abort!")
+        else:
+            raise OSError("Output exists and overwriting is disabled!")
+
+    # handle actual file
+    writer = gguf.GGUFWriter(path=None, arch=model_arch.arch)
+    writer.add_quantization_version(gguf.GGML_QUANT_VERSION)
+    if ftype_gguf is not None:
+        writer.add_file_type(ftype_gguf)
+
+    handle_tensors(writer, state_dict, model_arch)
+    writer.write_header_to_file(path=dst_path)
     writer.write_kv_data_to_file()
     writer.write_tensors_to_file(progress=True)
     writer.close()
+
+    fix = f"./fix_5d_tensors_{model_arch.arch}.safetensors"
+    if os.path.isfile(fix):
+        print(f"\n### Warning! Fix file found at '{fix}'")
+        print(f" you most likely need to run 'fix_5d_tensors.py' after quantization.")
+
+    return dst_path, model_arch
+
+if __name__ == "__main__":
+    args = parse_args()
+    convert_file(args.src, args.dst)
