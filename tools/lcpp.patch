@@ -39,10 +39,10 @@ index b16c462f..6d1568f1 100644
      const int idx = gguf_find_tensor(ctx, name);
      if (idx < 0) {
 diff --git a/src/llama.cpp b/src/llama.cpp
-index 24e1f1f0..d3ca4756 100644
+index 24e1f1f0..6a0c0a0e 100644
 --- a/src/llama.cpp
 +++ b/src/llama.cpp
-@@ -205,6 +205,14 @@ enum llm_arch {
+@@ -205,6 +205,15 @@ enum llm_arch {
      LLM_ARCH_GRANITE,
      LLM_ARCH_GRANITE_MOE,
      LLM_ARCH_CHAMELEON,
@@ -54,10 +54,11 @@ index 24e1f1f0..d3ca4756 100644
 +    LLM_ARCH_LTXV,
 +    LLM_ARCH_HYVID,
 +    LLM_ARCH_WAN,
++    LLM_ARCH_HIDREAM,
      LLM_ARCH_UNKNOWN,
  };
  
-@@ -258,6 +266,14 @@ static const std::map<llm_arch, const char *> LLM_ARCH_NAMES = {
+@@ -258,6 +267,15 @@ static const std::map<llm_arch, const char *> LLM_ARCH_NAMES = {
      { LLM_ARCH_GRANITE,         "granite"      },
      { LLM_ARCH_GRANITE_MOE,     "granitemoe"   },
      { LLM_ARCH_CHAMELEON,       "chameleon"    },
@@ -69,25 +70,27 @@ index 24e1f1f0..d3ca4756 100644
 +    { LLM_ARCH_LTXV,            "ltxv"         },
 +    { LLM_ARCH_HYVID,           "hyvid"        },
 +    { LLM_ARCH_WAN,             "wan"          },
++    { LLM_ARCH_HIDREAM,         "hidream"      },
      { LLM_ARCH_UNKNOWN,         "(unknown)"    },
  };
  
-@@ -1531,6 +1547,14 @@ static const std::map<llm_arch, std::map<llm_tensor, const char *>> LLM_TENSOR_N
+@@ -1531,6 +1549,15 @@ static const std::map<llm_arch, std::map<llm_tensor, const char *>> LLM_TENSOR_N
              { LLM_TENSOR_ATTN_K_NORM,     "blk.%d.attn_k_norm" },
          },
      },
-+    { LLM_ARCH_FLUX, {}},
-+    { LLM_ARCH_SD1,  {}},
-+    { LLM_ARCH_SDXL, {}},
-+    { LLM_ARCH_SD3,  {}},
-+    { LLM_ARCH_AURA, {}},
-+    { LLM_ARCH_LTXV, {}},
-+    { LLM_ARCH_HYVID,{}},
-+    { LLM_ARCH_WAN,{}},
++    { LLM_ARCH_FLUX,    {}},
++    { LLM_ARCH_SD1,     {}},
++    { LLM_ARCH_SDXL,    {}},
++    { LLM_ARCH_SD3,     {}},
++    { LLM_ARCH_AURA,    {}},
++    { LLM_ARCH_LTXV,    {}},
++    { LLM_ARCH_HYVID,   {}},
++    { LLM_ARCH_WAN,     {}},
++    { LLM_ARCH_HIDREAM, {}},
      {
          LLM_ARCH_UNKNOWN,
          {
-@@ -5403,6 +5427,22 @@ static void llm_load_hparams(
+@@ -5403,6 +5430,23 @@ static void llm_load_hparams(
      // get general kv
      ml.get_key(LLM_KV_GENERAL_NAME, model.name, false);
  
@@ -101,6 +104,7 @@ index 24e1f1f0..d3ca4756 100644
 +        case LLM_ARCH_LTXV:
 +        case LLM_ARCH_HYVID:
 +        case LLM_ARCH_WAN:
++        case LLM_ARCH_HIDREAM:
 +            model.ftype = ml.ftype;
 +            return;
 +        default:
@@ -110,7 +114,7 @@ index 24e1f1f0..d3ca4756 100644
      // get hparams kv
      ml.get_key(LLM_KV_VOCAB_SIZE, hparams.n_vocab, false) || ml.get_arr_n(LLM_KV_TOKENIZER_LIST, hparams.n_vocab);
  
-@@ -18016,6 +18056,128 @@ static void llama_tensor_dequantize_internal(
+@@ -18016,6 +18060,128 @@ static void llama_tensor_dequantize_internal(
      workers.clear();
  }
  
@@ -239,7 +243,7 @@ index 24e1f1f0..d3ca4756 100644
  static ggml_type llama_tensor_get_type(quantize_state_internal & qs, ggml_type new_type, const ggml_tensor * tensor, llama_ftype ftype) {
      const std::string name = ggml_get_name(tensor);
  
-@@ -18513,7 +18675,9 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
+@@ -18513,7 +18679,9 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
          if (llama_model_has_encoder(&model)) {
              n_attn_layer *= 3;
          }
@@ -250,7 +254,7 @@ index 24e1f1f0..d3ca4756 100644
      }
  
      size_t total_size_org = 0;
-@@ -18547,6 +18711,45 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
+@@ -18547,6 +18715,45 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
              ctx_outs[i_split] = gguf_init_empty();
          }
          gguf_add_tensor(ctx_outs[i_split], tensor);
@@ -296,7 +300,7 @@ index 24e1f1f0..d3ca4756 100644
      }
  
      // Set split info if needed
-@@ -18647,6 +18850,83 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
+@@ -18647,6 +18854,92 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
          // do not quantize relative position bias (T5)
          quantize &= name.find("attn_rel_b.weight") == std::string::npos;
  
@@ -372,6 +376,15 @@ index 24e1f1f0..d3ca4756 100644
 +            quantize &= name.find("img_emb.") == std::string::npos;
 +            quantize &= name.find("head.") == std::string::npos;
 +        }
++        if (model.arch == LLM_ARCH_HIDREAM) {
++            image_model = true;
++            quantize &= name.find("p_embedder.") == std::string::npos;
++            quantize &= name.find("t_embedder.") == std::string::npos;
++            quantize &= name.find("x_embedder.") == std::string::npos;
++            quantize &= name.find("final_layer.") == std::string::npos;
++            quantize &= name.find(".ff_i.gate.weight") == std::string::npos;
++            quantize &= name.find("caption_projection.") == std::string::npos;
++        }
 +        // ignore 3D/4D tensors for image models as the code was never meant to handle these
 +        if (image_model) {
 +            quantize &= ggml_n_dims(tensor) == 2;
@@ -380,7 +393,7 @@ index 24e1f1f0..d3ca4756 100644
          enum ggml_type new_type;
          void * new_data;
          size_t new_size;
-@@ -18655,6 +18935,9 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
+@@ -18655,6 +18948,9 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
              new_type = default_type;
  
              // get more optimal quantization type based on the tensor shape, layer, etc.
@@ -390,7 +403,7 @@ index 24e1f1f0..d3ca4756 100644
              if (!params->pure && ggml_is_quantized(default_type)) {
                  new_type = llama_tensor_get_type(qs, new_type, tensor, ftype);
              }
-@@ -18664,6 +18947,7 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
+@@ -18664,6 +18960,7 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
              if (params->output_tensor_type < GGML_TYPE_COUNT && strcmp(tensor->name, "output.weight") == 0) {
                  new_type = params->output_tensor_type;
              }

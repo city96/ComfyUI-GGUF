@@ -45,6 +45,18 @@ class ModelAura(ModelTemplate):
     ]
     keys_banned = ["joint_transformer_blocks.3.ff_context.out_projection.weight",]
 
+class ModelHiDream(ModelTemplate):
+    arch = "hidream"
+    keys_detect = [
+        (
+            "caption_projection.0.linear.weight",
+            "double_stream_blocks.0.block.ff_i.shared_experts.w3.weight"
+        )
+    ]
+    keys_hiprec = [
+        ".ff_i.gate.weight" # nn.parameter, can't load from BF16 ver
+    ]
+
 class ModelHyVid(ModelTemplate):
     arch = "hyvid"
     keys_detect = [
@@ -113,7 +125,7 @@ class ModelSD1(ModelTemplate):
     ]
 
 # The architectures are checked in order and the first successful match terminates the search.
-arch_list = [ModelFlux, ModelSD3, ModelAura, ModelLTXV, ModelHyVid, ModelWan, ModelSDXL, ModelSD1]
+arch_list = [ModelFlux, ModelSD3, ModelAura, ModelHiDream, ModelLTXV, ModelHyVid, ModelWan, ModelSDXL, ModelSD1]
 
 def is_model_arch(model, state_dict):
     # check if model is correct
