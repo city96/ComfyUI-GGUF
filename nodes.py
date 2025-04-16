@@ -288,10 +288,34 @@ class TripleCLIPLoaderGGUF(CLIPLoaderGGUF):
         clip_paths = (clip_path1, clip_path2, clip_path3)
         return (self.load_patcher(clip_paths, get_clip_type(type), self.load_data(clip_paths)),)
 
+class QuadrupleCLIPLoaderGGUF(CLIPLoaderGGUF):
+    @classmethod
+    def INPUT_TYPES(s):
+        file_options = (s.get_filename_list(), )
+        return {
+            "required": {
+            "clip_name1": file_options,
+            "clip_name2": file_options,
+            "clip_name3": file_options,
+            "clip_name4": file_options,
+        }
+    }
+
+    TITLE = "QuadrupleCLIPLoader (GGUF)"
+
+    def load_clip(self, clip_name1, clip_name2, clip_name3, clip_name4, type="stable_diffusion"):
+        clip_path1 = folder_paths.get_full_path("clip", clip_name1)
+        clip_path2 = folder_paths.get_full_path("clip", clip_name2)
+        clip_path3 = folder_paths.get_full_path("clip", clip_name3)
+        clip_path4 = folder_paths.get_full_path("clip", clip_name4)
+        clip_paths = (clip_path1, clip_path2, clip_path3, clip_path4)
+        return (self.load_patcher(clip_paths, get_clip_type(type), self.load_data(clip_paths)),)
+
 NODE_CLASS_MAPPINGS = {
     "UnetLoaderGGUF": UnetLoaderGGUF,
     "CLIPLoaderGGUF": CLIPLoaderGGUF,
     "DualCLIPLoaderGGUF": DualCLIPLoaderGGUF,
     "TripleCLIPLoaderGGUF": TripleCLIPLoaderGGUF,
+    "QuadrupleCLIPLoaderGGUF": QuadrupleCLIPLoaderGGUF,
     "UnetLoaderGGUFAdvanced": UnetLoaderGGUFAdvanced,
 }
