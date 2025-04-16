@@ -227,6 +227,8 @@ class CLIPLoaderGGUF:
                 sd = gguf_clip_loader(p)
             else:
                 sd = comfy.utils.load_torch_file(p, safe_load=True)
+                if "scaled_fp8" in sd: # NOTE: Scaled FP8 would require different custom ops, but only one can be active
+                    raise NotImplementedError(f"Mixing scaled FP8 with GGUF is not supported! Use regular CLIP loader or switch model(s)\n({p})")
             clip_data.append(sd)
         return clip_data
 
