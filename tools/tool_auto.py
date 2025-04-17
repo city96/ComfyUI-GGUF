@@ -42,6 +42,7 @@ def get_args():
     parser.add_argument("--output-dir", default=None, help="Location for output files, defaults to current dir or ComfyUI model dir.")
     parser.add_argument("--temp-dir", default=None, help="Location for temp files, defaults to [output_dir]/tmp")
     parser.add_argument("--force-update", action="store_true", help="Force update & rebuild entire quantization stack.")
+    parser.add_argument("--resume", action="store_true", help="Skip over existing files. Will NOT check for broken/interrupted files.")
 
     args = parser.parse_args()
     if args.output_dir is None:
@@ -135,8 +136,11 @@ def setup_utils(force_update=False):
             logging.info("Patch already applied")
 
     # using cmake here as llama.cpp switched to it completely for new versions
-    bin_name = "llama-quantize.exe" if os.name == 'nt' else "llama.quantize"
-    bin_path = os.path.join(lcpp_path, "build", "bin", "debug", bin_name)
+    if os.name == "nt":
+        bin_path = os.path.join(lcpp_path, "build", "bin", "debug", "llama-quantize.exe")
+    else:
+        bin_path = os.path.join(lcpp_path, "build", "bin", "llama-quantize")
+
     if not os.path.isfile(bin_path) or force_update or need_update:
         if run_cmd("cmake", "--version") != 0:
             raise RuntimeError("Can't find cmake! Make sure you have a working build environment set up")
@@ -240,7 +244,7 @@ def get_hf_valid_files(repo):
                 logging.info(f"Found '{arch}' model at path {path}")
     return valid
 
-def make_base_quant(src, output_dir, temp_dir, final=True):
+def make_base_quant(src, output_dir, temp_dir, final=True, resume=True):
     name, ext = os.path.splitext(os.path.basename(src))
     if ext == ".gguf":
         logging.info("Input file already in gguf, assuming base quant")
@@ -252,6 +256,9 @@ def make_base_quant(src, output_dir, temp_dir, final=True):
     tmp_path, model_arch, fix_path = convert_file(src, dst_tmp, interact=False, overwrite=False)
     dst_path = os.path.join(output_dir, os.path.basename(tmp_path))
     if os.path.isfile(dst_path):
+        if resume:
+            logging.warning("Resuming with interrupted base quant, may be incorrect!")
+            return dst_path, tmp_path, fix_path
         raise OSError(f"Output already exists! Clear folder? {dst_path}")
 
     if fix_path is not None and os.path.isfile(fix_path):
@@ -271,7 +278,7 @@ def make_base_quant(src, output_dir, temp_dir, final=True):
 
     return dst_path, quant_source, fix_path
 
-def make_quant(src, output_dir, temp_dir, qtype, quantize_binary, fix_path=None):
+def make_quant(src, output_dir, temp_dir, qtype, quantize_binary, fix_path=None, resume=True):
     name, ext = os.path.splitext(os.path.basename(src))
     assert ext.lower() == ".gguf", "Invalid input file"
 
@@ -289,6 +296,8 @@ def make_quant(src, output_dir, temp_dir, qtype, quantize_binary, fix_path=None)
     tmp_path = os.path.abspath(tmp_path)
     dst_path = os.path.join(output_dir, os.path.basename(tmp_path))
     if os.path.isfile(dst_path):
+        if resume:
+            return dst_path
         raise OSError("Output already exists! Clear folder?")
 
     r = run_cmd(quantize_binary, src, tmp_path, qtype, log_error=True)
@@ -333,7 +342,8 @@ if __name__ == "__main__":
         args.src,
         args.output_dir,
         args.temp_dir,
-        final=("base" in args.quants)
+        final=("base" in args.quants),
+        resume=args.resume,
     )
     if "base" in args.quants:
         args.quants = [x for x in args.quants if x not in ["base"]]
@@ -348,6 +358,7 @@ if __name__ == "__main__":
             qtype,
             quantize_binary,
             fix_path,
+            resume=args.resume,
         ))
 
     if fix_path is not None and os.path.isfile(fix_path):
