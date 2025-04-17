@@ -99,7 +99,7 @@ class GGUFModelPatcher(comfy.model_patcher.ModelPatcher):
                             linked.append((n, m))
                             continue
             if linked:
-                print(f"Attempting to release mmap ({len(linked)})")
+                logging.info(f"Attempting to release mmap ({len(linked)})")
                 for n, m in linked:
                     # TODO: possible to OOM, find better way to detach
                     m.to(self.load_device).to(self.offload_device)
@@ -192,7 +192,7 @@ CLIP_ENUM_MAP = {
 def get_clip_type(name):
     enum_name = CLIP_ENUM_MAP.get(name, None)
     if enum_name is None:
-        raise ValueError(f"Unknown CLIP model type {name}") 
+        raise ValueError(f"Unknown CLIP model type {name}")
     clip_type = getattr(comfy.sd.CLIPType, CLIP_ENUM_MAP[name], None)
     if clip_type is None:
         raise ValueError(f"Unsupported CLIP model type {name} (Update ComfyUI)")
@@ -227,6 +227,8 @@ class CLIPLoaderGGUF:
                 sd = gguf_clip_loader(p)
             else:
                 sd = comfy.utils.load_torch_file(p, safe_load=True)
+                if "scaled_fp8" in sd: # NOTE: Scaled FP8 would require different custom ops, but only one can be active
+                    raise NotImplementedError(f"Mixing scaled FP8 with GGUF is not supported! Use regular CLIP loader or switch model(s)\n({p})")
             clip_data.append(sd)
         return clip_data
 
@@ -288,10 +290,34 @@ class TripleCLIPLoaderGGUF(CLIPLoaderGGUF):
         clip_paths = (clip_path1, clip_path2, clip_path3)
         return (self.load_patcher(clip_paths, get_clip_type(type), self.load_data(clip_paths)),)
 
+class QuadrupleCLIPLoaderGGUF(CLIPLoaderGGUF):
+    @classmethod
+    def INPUT_TYPES(s):
+        file_options = (s.get_filename_list(), )
+        return {
+            "required": {
+            "clip_name1": file_options,
+            "clip_name2": file_options,
+            "clip_name3": file_options,
+            "clip_name4": file_options,
+        }
+    }
+
+    TITLE = "QuadrupleCLIPLoader (GGUF)"
+
+    def load_clip(self, clip_name1, clip_name2, clip_name3, clip_name4, type="stable_diffusion"):
+        clip_path1 = folder_paths.get_full_path("clip", clip_name1)
+        clip_path2 = folder_paths.get_full_path("clip", clip_name2)
+        clip_path3 = folder_paths.get_full_path("clip", clip_name3)
+        clip_path4 = folder_paths.get_full_path("clip", clip_name4)
+        clip_paths = (clip_path1, clip_path2, clip_path3, clip_path4)
+        return (self.load_patcher(clip_paths, get_clip_type(type), self.load_data(clip_paths)),)
+
 NODE_CLASS_MAPPINGS = {
     "UnetLoaderGGUF": UnetLoaderGGUF,
     "CLIPLoaderGGUF": CLIPLoaderGGUF,
     "DualCLIPLoaderGGUF": DualCLIPLoaderGGUF,
     "TripleCLIPLoaderGGUF": TripleCLIPLoaderGGUF,
+    "QuadrupleCLIPLoaderGGUF": QuadrupleCLIPLoaderGGUF,
     "UnetLoaderGGUFAdvanced": UnetLoaderGGUFAdvanced,
 }

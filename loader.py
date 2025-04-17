@@ -1,11 +1,13 @@
 # (c) City96 || Apache-2.0 (apache.org/licenses/LICENSE-2.0)
+import warnings
+import logging
 import torch
 import gguf
 
 from .ops import GGMLTensor
 from .dequant import is_quantized, dequantize_tensor
 
-IMG_ARCH_LIST = {"flux", "sd1", "sdxl", "sd3", "aura", "ltxv", "hyvid", "wan"}
+IMG_ARCH_LIST = {"flux", "sd1", "sdxl", "sd3", "aura", "hidream", "ltxv", "hyvid", "wan"}
 TXT_ARCH_LIST = {"t5", "t5encoder", "llama"}
 
 def get_orig_shape(reader, tensor_name):
@@ -81,14 +83,19 @@ def gguf_sd_loader(path, handle_prefix="model.diffusion_model.", return_arch=Fal
         raise ValueError(f"Unexpected architecture type in GGUF file: {arch_str!r}")
 
     if compat:
-        print(f"Warning: This model file is loaded in compatibility mode '{compat}' [arch:{arch_str}]")
+        logging.warning(f"Warning: This model file is loaded in compatibility mode '{compat}' [arch:{arch_str}]")
 
     # main loading loop
     state_dict = {}
     qtype_dict = {}
     for sd_key, tensor in tensors:
         tensor_name = tensor.name
-        torch_tensor = torch.from_numpy(tensor.data) # mmap
+        # torch_tensor = torch.from_numpy(tensor.data) # mmap
+
+        # NOTE: line above replaced with this block to avoid persistent numpy warning about mmap
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message="The given NumPy array is not writable")
+            torch_tensor = torch.from_numpy(tensor.data) # mmap
 
         shape = get_orig_shape(reader, tensor_name)
         if shape is None:
@@ -109,7 +116,7 @@ def gguf_sd_loader(path, handle_prefix="model.diffusion_model.", return_arch=Fal
         qtype_dict[tensor_type_str] = qtype_dict.get(tensor_type_str, 0) + 1
 
     # print loaded tensor type counts
-    print("gguf qtypes: " + ", ".join(f"{k} ({v})" for k, v in qtype_dict.items()))
+    logging.info("gguf qtypes: " + ", ".join(f"{k} ({v})" for k, v in qtype_dict.items()))
 
     # mark largest tensor for vram estimation
     qsd = {k:v for k,v in state_dict.items() if is_quantized(v)}
@@ -177,7 +184,7 @@ def llama_permute(raw_sd, n_head, n_head_kv):
 
 def gguf_tokenizer_loader(path, temb_shape):
     # convert gguf tokenizer to spiece
-    print(f"Attempting to recreate sentencepiece tokenizer from GGUF file metadata...")
+    logging.info("Attempting to recreate sentencepiece tokenizer from GGUF file metadata...")
     try:
         from sentencepiece import sentencepiece_model_pb2 as model
     except ImportError:
@@ -190,9 +197,9 @@ def gguf_tokenizer_loader(path, temb_shape):
         if temb_shape == (256384, 4096): # probably UMT5
             spm.trainer_spec.model_type == 1 # Unigram (do we have a T5 w/ BPE?)
         else:
-            raise NotImplementedError(f"Unknown model, can't set tokenizer!")
+            raise NotImplementedError("Unknown model, can't set tokenizer!")
     else:
-        raise NotImplementedError(f"Unknown model, can't set tokenizer!")
+        raise NotImplementedError("Unknown model, can't set tokenizer!")
 
     spm.normalizer_spec.add_dummy_prefix = get_field(reader, "tokenizer.ggml.add_space_prefix", bool)
     spm.normalizer_spec.remove_extra_whitespaces = get_field(reader, "tokenizer.ggml.remove_extra_whitespaces", bool)
@@ -219,7 +226,7 @@ def gguf_tokenizer_loader(path, temb_shape):
     spm.trainer_spec.eos_id = get_field(reader, "tokenizer.ggml.eos_token_id", int)
     spm.trainer_spec.pad_id = get_field(reader, "tokenizer.ggml.padding_token_id", int)
 
-    print(f"Created tokenizer with vocab size of {len(spm.pieces)}")
+    logging.info(f"Created tokenizer with vocab size of {len(spm.pieces)}")
     del reader
     return torch.ByteTensor(list(spm.SerializeToString()))
 
@@ -231,14 +238,14 @@ def gguf_clip_loader(path):
             # non-standard Comfy-Org tokenizer
             sd["spiece_model"] = gguf_tokenizer_loader(path, sd[temb_key].shape)
             # TODO: dequantizing token embed here is janky but otherwise we OOM due to tensor being massive.
-            print(f"Dequantizing {temb_key} to prevent runtime OOM.")
+            logging.warning(f"Dequantizing {temb_key} to prevent runtime OOM.")
             sd[temb_key] = dequantize_tensor(sd[temb_key], dtype=torch.float16)
         sd = sd_map_replace(sd, T5_SD_MAP)
     elif arch in {"llama"}:
         temb_key = "token_embd.weight"
         if temb_key in sd and sd[temb_key].shape != (128320, 4096):
             # This still works. Raise error?
-            print("Warning! token_embd shape may be incorrect for llama 3 model!")
+            logging.warning("Warning! token_embd shape may be incorrect for llama 3 model!")
         sd = sd_map_replace(sd, LLAMA_SD_MAP)
         sd = llama_permute(sd, 32, 8) # L3
     else:
