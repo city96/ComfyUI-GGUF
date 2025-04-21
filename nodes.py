@@ -114,6 +114,8 @@ class GGUFModelPatcher(comfy.model_patcher.ModelPatcher):
         self.__class__ = src_cls
         # GGUF specific clone values below
         n.patch_on_device = getattr(self, "patch_on_device", False)
+        if src_cls != GGUFModelPatcher:
+            n.size = 0 # force recalc
         return n
 
 class UnetLoaderGGUF:
