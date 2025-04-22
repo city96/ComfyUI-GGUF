@@ -111,6 +111,9 @@ class GGMLLayer(torch.nn.Module):
         # NOTE: using modified load for linear due to not initializing on creation, see GGMLOps todo
         if self.is_ggml_quantized(weight=weight, bias=bias) or isinstance(self, torch.nn.Linear):
             return self.ggml_load_from_state_dict(state_dict, prefix, *args, **kwargs)
+        # Not strictly required, but fixes embedding shape mismatch. Threshold set in loader.py
+        if isinstance(self, torch.nn.Embedding) and self.weight.shape[0] >= (64 * 1024):
+            return self.ggml_load_from_state_dict(state_dict, prefix, *args, **kwargs)
         return super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
 
     def ggml_load_from_state_dict(self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs):

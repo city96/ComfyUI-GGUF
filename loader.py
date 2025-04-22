@@ -242,10 +242,8 @@ def gguf_clip_loader(path):
             sd[temb_key] = dequantize_tensor(sd[temb_key], dtype=torch.float16)
         sd = sd_map_replace(sd, T5_SD_MAP)
     elif arch in {"llama"}:
+        # TODO: pass model_options["vocab_size"] to loader somehow
         temb_key = "token_embd.weight"
-        if temb_key in sd and sd[temb_key].shape != (128320, 4096):
-            # This still works. TODO: Only relevant for llava?
-            logging.warning("Warning! token_embd shape may be incorrect for llama 3 model!")
         if temb_key in sd and sd[temb_key].shape[0] >= (64 * 1024):
             # See note above for T5.
             logging.warning(f"Dequantizing {temb_key} to prevent runtime OOM.")
