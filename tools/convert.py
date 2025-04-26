@@ -2,6 +2,7 @@
 import os
 import gguf
 import torch
+import logging
 import argparse
 from tqdm import tqdm
 from safetensors.torch import load_file, save_file
@@ -54,7 +55,9 @@ class ModelHiDream(ModelTemplate):
         )
     ]
     keys_hiprec = [
-        ".ff_i.gate.weight" # nn.parameter, can't load from BF16 ver
+        # nn.parameter, can't load from BF16 ver
+        ".ff_i.gate.weight",
+        "img_emb.emb_pos"
     ]
 
 class ModelHyVid(ModelTemplate):
@@ -275,7 +278,7 @@ def convert_file(path, dst_path=None, interact=True, overwrite=False):
     # load & run model detection logic
     state_dict = load_state_dict(path)
     model_arch = detect_arch(state_dict)
-    print(f"* Architecture detected from input: {model_arch.arch}")
+    logging.info(f"* Architecture detected from input: {model_arch.arch}")
 
     # detect & set dtype for output file
     dtypes = [x.dtype for x in state_dict.values()]
@@ -317,8 +320,8 @@ def convert_file(path, dst_path=None, interact=True, overwrite=False):
 
     fix = f"./fix_5d_tensors_{model_arch.arch}.safetensors"
     if os.path.isfile(fix):
-        print(f"\n### Warning! Fix file found at '{fix}'")
-        print(f" you most likely need to run 'fix_5d_tensors.py' after quantization.")
+        logging.warning(f"\n### Warning! Fix file found at '{fix}'")
+        logging.warning(" you most likely need to run 'fix_5d_tensors.py' after quantization.")
 
     return dst_path, model_arch
 
