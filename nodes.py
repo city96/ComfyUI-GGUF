@@ -5,6 +5,8 @@ import collections
 
 import nodes
 import comfy.sd
+import comfy.lora
+import comfy.float
 import comfy.utils
 import comfy.model_patcher
 import comfy.model_management
@@ -37,17 +39,12 @@ class GGUFModelPatcher(comfy.model_patcher.ModelPatcher):
             return
         weight = comfy.utils.get_attr(self.model, key)
 
-        try:
-            from comfy.lora import calculate_weight
-        except Exception:
-            calculate_weight = self.calculate_weight
-
         patches = self.patches[key]
         if is_quantized(weight):
             out_weight = weight.to(device_to)
             patches = move_patch_to_device(patches, self.load_device if self.patch_on_device else self.offload_device)
             # TODO: do we ever have legitimate duplicate patches? (i.e. patch on top of patched weight)
-            out_weight.patches = [(calculate_weight, patches, key)]
+            out_weight.patches = [(patches, key)]
         else:
             inplace_update = self.weight_inplace_update or inplace_update
             if key not in self.backup:
@@ -60,7 +57,7 @@ class GGUFModelPatcher(comfy.model_patcher.ModelPatcher):
             else:
                 temp_weight = weight.to(torch.float32, copy=True)
 
-            out_weight = calculate_weight(patches, temp_weight, key)
+            out_weight = comfy.lora.calculate_weight(patches, temp_weight, key)
             out_weight = comfy.float.stochastic_rounding(out_weight, weight.dtype)
 
         if inplace_update:

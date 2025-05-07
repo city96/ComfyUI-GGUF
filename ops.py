@@ -4,6 +4,7 @@ import torch
 import logging
 
 import comfy.ops
+import comfy.lora
 import comfy.model_management
 from .dequant import dequantize_tensor, is_quantized
 
@@ -169,7 +170,7 @@ class GGMLLayer(torch.nn.Module):
         # consolidate and load patches to GPU in async
         patch_list = []
         device = tensor.device
-        for function, patches, key in getattr(tensor, "patches", []):
+        for patches, key in getattr(tensor, "patches", []):
             patch_list += move_patch_to_device(patches, device)
 
         # dequantize tensor while patches load
@@ -180,13 +181,13 @@ class GGMLLayer(torch.nn.Module):
             weight = torch.Tensor(weight)
 
         # apply patches
-        if patch_list:
+        if len(patch_list) > 0:
             if self.patch_dtype is None:
-                weight = function(patch_list, weight, key)
+                weight = comfy.lora.calculate_weight(patch_list, weight, key)
             else:
                 # for testing, may degrade image quality
                 patch_dtype = dtype if self.patch_dtype == "target" else self.patch_dtype
-                weight = function(patch_list, weight, key, patch_dtype)
+                weight = comfy.lora.calculate_weight(patch_list, weight, key, patch_dtype)
         return weight
 
     @torch_compiler_disable()
