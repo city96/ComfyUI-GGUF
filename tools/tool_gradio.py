@@ -8,7 +8,7 @@ import shutil
 import huggingface_hub as hf
 import re
 from typing import List, Optional, Dict, Tuple
-from tool_auto import get_hf_valid_files, normalize_hf_path
+from tool_auto import get_hf_valid_files, normalize_hf_path, setup_utils
 
 # Import the list of valid extensions directly from tool_auto.py
 try:
@@ -844,4 +844,4 @@ def main():
     demo.queue().launch(show_api=False, share=False)
 
 if __name__ == "__main__":
-    main() 
+    main()

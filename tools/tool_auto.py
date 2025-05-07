@@ -155,6 +155,15 @@ def setup_utils(force_update=False):
     else:
         logging.info("Binary already present")
 
+    # import & add used functions to global
+    try:
+        from convert import detect_arch, strip_prefix, convert_file
+        from fix_5d_tensors import apply_5d_fix
+        for fn in [detect_arch, strip_prefix, convert_file, apply_5d_fix]:
+            globals()[fn.__name__] = fn # TODO: not this
+    except [ImportError, ModuleNotFoundError] as e:
+        raise ImportError(f"Can't import required utils: {e}")
+
     return bin_path
 
 def get_output_dir():
@@ -243,6 +252,29 @@ def get_hf_valid_files(repo):
                 valid[path] = arch
                 logging.info(f"Found '{arch}' model at path {path}")
     return valid
+
+
+def normalize_hf_path(path):
+    if not path:
+        return ""
+    path = path.rstrip('/')
+
+    if path.startswith(('http://', 'https://')):
+        parts = path.split('/')
+        if 'huggingface.co' in parts:
+            idx = parts.index('huggingface.co')
+            if len(parts) > idx + 2:
+                # Extract username/modelname, ignoring any additional paths
+                return f"{parts[idx+1]}/{parts[idx+2]}"
+
+    # Handle direct paths (username/modelname)
+    if '/' in path and not path.startswith('/'):
+        parts = path.split('/')
+        if len(parts) >= 2:
+            # Take only the first two parts (username/modelname)
+            return f"{parts[0]}/{parts[1]}"
+
+    return ""
 
 def make_base_quant(src, output_dir, temp_dir, final=True, resume=True):
     name, ext = os.path.splitext(os.path.basename(src))
