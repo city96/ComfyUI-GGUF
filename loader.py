@@ -45,7 +45,7 @@ def get_list_field(reader, field_name, field_type):
     else:
         raise TypeError(f"Unknown field type {field_type}")
 
-def gguf_sd_loader(path, handle_prefix="model.diffusion_model.", return_arch=False):
+def gguf_sd_loader(path, handle_prefix="model.diffusion_model.", return_arch=False, is_text_model=False):
     """
     Read state dict as fake tensors
     """
@@ -70,20 +70,23 @@ def gguf_sd_loader(path, handle_prefix="model.diffusion_model.", return_arch=Fal
     # detect and verify architecture
     compat = None
     arch_str = get_field(reader, "general.architecture", str)
-    if arch_str is None: # stable-diffusion.cpp
+    if arch_str in [None, "pig"]:
+        if is_text_model:
+            raise ValueError(f"This text model is incompatible with llama.cpp!\nConsider using the safetensors version\n({path})")
+        compat = "sd.cpp" if arch_str is None else arch_str
         # import here to avoid changes to convert.py breaking regular models
         from .tools.convert import detect_arch
-        arch_str = detect_arch(set(val[0] for val in tensors)).arch
-        compat = "sd.cpp"
-    elif arch_str in ["pig"]:
-        from .tools.convert import detect_arch
-        arch_str = detect_arch(set(val[0] for val in tensors)).arch
-        compat = "pig"
-    elif arch_str not in IMG_ARCH_LIST and arch_str not in TXT_ARCH_LIST:
+        try:
+            arch_str = detect_arch(set(val[0] for val in tensors)).arch
+        except Exception as e:
+            raise ValueError(f"This model is not currently supported - ({e})")
+    elif arch_str not in TXT_ARCH_LIST and is_text_model:
+        raise ValueError(f"Unexpected text model architecture type in GGUF file: {arch_str!r}")
+    elif arch_str not in IMG_ARCH_LIST and not is_text_model:
         raise ValueError(f"Unexpected architecture type in GGUF file: {arch_str!r}")
 
     if compat:
-        logging.warning(f"Warning: This model file is loaded in compatibility mode '{compat}' [arch:{arch_str}]")
+        logging.warning(f"Warning: This gguf model file is loaded in compatibility mode '{compat}' [arch:{arch_str}]")
 
     # main loading loop
     state_dict = {}
@@ -231,7 +234,7 @@ def gguf_tokenizer_loader(path, temb_shape):
     return torch.ByteTensor(list(spm.SerializeToString()))
 
 def gguf_clip_loader(path):
-    sd, arch = gguf_sd_loader(path, return_arch=True)
+    sd, arch = gguf_sd_loader(path, return_arch=True, is_text_model=True)
     if arch in {"t5", "t5encoder"}:
         temb_key = "token_embd.weight"
         if temb_key in sd and sd[temb_key].shape == (256384, 4096):
