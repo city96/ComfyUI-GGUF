@@ -1,5 +1,5 @@
 [project]
-name = "comfyui-gguf"
+name = "ComfyUI-GGUF"
 description = "GGUF Quantization support for native ComfyUI models."
 version = "1.1.0" # 2.0.0 = GitHub main, 1.X.X = ComfyUI Registry
 license = { file = "LICENSE" }
