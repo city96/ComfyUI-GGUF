@@ -2,6 +2,7 @@
 import os
 import gguf
 import torch
+import logging
 import argparse
 from tqdm import tqdm
 from safetensors.torch import load_file, save_file
@@ -52,7 +53,9 @@ class ModelHiDream(ModelTemplate):
         )
     ]
     keys_hiprec = [
-        ".ff_i.gate.weight" # nn.parameter, can't load from BF16 ver
+        # nn.parameter, can't load from BF16 ver
+        ".ff_i.gate.weight",
+        "img_emb.emb_pos"
     ]
 
 class ModelHyVid(ModelTemplate):
@@ -283,14 +286,14 @@ def handle_tensors(writer, state_dict, model_arch, allow_fp32=False):
         tqdm.write(f"{f'%-{max_name_len + 4}s' % f'{key}'} {old_dtype} --> {data_qtype.name}, shape = {shape_str}")
 
         writer.add_tensor(key, data, raw_dtype=data_qtype)
-    
+
     return quantized_tensors, invalid_tensors
 
 def convert_file(path, dst_path=None, interact=True, overwrite=False, allow_fp32=False):
     # load & run model detection logic
     state_dict = load_state_dict(path)
     model_arch = detect_arch(state_dict)
-    print(f"* Architecture detected from input: {model_arch.arch}")
+    logging.info(f"* Architecture detected from input: {model_arch.arch}")
 
     ftype_name, ftype_gguf = find_main_dtype(state_dict, allow_fp32=allow_fp32)
 
@@ -325,8 +328,8 @@ def convert_file(path, dst_path=None, interact=True, overwrite=False, allow_fp32
 
         invalid_tensors = {k:torch.from_numpy(v.copy()) for k,v in invalid_tensors.items()}
         save_file(invalid_tensors, fix_path)
-        print(f"\n### Warning! Fix file saved to '{fix_path}'")
-        print(f" you most likely need to run 'fix_5d_tensors.py' after quantization.")
+        logging.warning(f"\n### Warning! Fix file found at '{fix_path}'")
+        logging.warning(" you most likely need to run 'fix_5d_tensors.py' after quantization.")
     else:
         fix_path = None
 
