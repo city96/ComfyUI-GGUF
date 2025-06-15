@@ -40,12 +40,39 @@ git apply ..\lcpp.patch
 
 Compile the llama-quantize binary. This example uses cmake, on linux you can just use make.
 
+### Visual Studio 2019, Linux, etc...
+
 ```
 mkdir build
 cmake -B build
 cmake --build build --config Debug -j10 --target llama-quantize
 cd ..
 ```
+
+### Visual Studio 2022
+
+```
+mkdir build
+cmake -B build -DCMAKE_CXX_STANDARD=17 -DCMAKE_CXX_STANDARD_REQUIRED=ON -DCMAKE_CXX_FLAGS="-std=c++17"
+```
+
+Edit the `llama.cpp\common\log.cpp` file, inserts two lines after the existing first line:
+
+```
+#include "log.h"
+
+#define _SILENCE_CXX23_CHRONO_DEPRECATION_WARNING
+#include <chrono>
+```
+
+Then you can build the project:
+```
+cmake --build build --config Debug -j10 --target llama-quantize
+cd ..
+```
+
+### Quantize your model
+
 
 Now you can use the newly build binary to quantize your model to the desired format:
 ```
