@@ -142,7 +142,7 @@ class UnetLoaderGGUF:
         self.base_model = None
         self.current_model = None
 
-    def load_unet(self, mode, unet_name, dequant_dtype=None, patch_dtype=None, patch_on_device=None, unique_id=None):
+    def load_unet(self, unet_name, mode, dequant_dtype=None, patch_dtype=None, patch_on_device=None, unique_id=None):
         # Get current list of available models
         unet_names = folder_paths.get_filename_list("unet_gguf")
         
