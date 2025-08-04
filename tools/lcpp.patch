@@ -56,6 +56,7 @@ index 24e1f1f0..9957ea30 100644
 +    LLM_ARCH_WAN,
 +    LLM_ARCH_HIDREAM,
 +    LLM_ARCH_COSMOS,
++    LLM_ARCH_LUMINA2,
      LLM_ARCH_UNKNOWN,
  };
  
@@ -73,6 +74,7 @@ index 24e1f1f0..9957ea30 100644
 +    { LLM_ARCH_WAN,             "wan"          },
 +    { LLM_ARCH_HIDREAM,         "hidream"      },
 +    { LLM_ARCH_COSMOS,          "cosmos"       },
++    { LLM_ARCH_LUMINA2,         "lumina2"      },
      { LLM_ARCH_UNKNOWN,         "(unknown)"    },
  };
  
@@ -90,6 +92,7 @@ index 24e1f1f0..9957ea30 100644
 +    { LLM_ARCH_WAN,     {}},
 +    { LLM_ARCH_HIDREAM, {}},
 +    { LLM_ARCH_COSMOS,  {}},
++    { LLM_ARCH_LUMINA2, {}},
      {
          LLM_ARCH_UNKNOWN,
          {
@@ -109,6 +112,7 @@ index 24e1f1f0..9957ea30 100644
 +        case LLM_ARCH_WAN:
 +        case LLM_ARCH_HIDREAM:
 +        case LLM_ARCH_COSMOS:
++        case LLM_ARCH_LUMINA2:
 +            model.ftype = ml.ftype;
 +            return;
 +        default:
@@ -407,6 +411,15 @@ index 24e1f1f0..9957ea30 100644
 +            quantize &= name.find("x_embedder.") == std::string::npos;
 +            quantize &= name.find("pos_embedder.") == std::string::npos;
 +            quantize &= name.find("final_layer.") == std::string::npos;
++        }
++        if (model.arch == LLM_ARCH_LUMINA2) {
++        image_model = true;
++        quantize &= name.find("t_embedder.") == std::string::npos;
++        quantize &= name.find("x_embedder.") == std::string::npos;
++        quantize &= name.find("final_layer.") == std::string::npos;
++        quantize &= name.find("cap_embedder.") == std::string::npos;
++        quantize &= name.find("context_refiner.") == std::string::npos;
++        quantize &= name.find("noise_refiner.") == std::string::npos;
 +        }
 +        // ignore 3D/4D tensors for image models as the code was never meant to handle these
 +        if (image_model) {
