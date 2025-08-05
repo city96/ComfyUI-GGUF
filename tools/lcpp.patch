@@ -204,7 +204,7 @@ index 24e1f1f0..5d191f92 100644
 +            (name.find(".adaln_modulation_mlp.2.weight") != std::string::npos) ||
 +            (name.find(".feed_forward.w2.weight") != std::string::npos) ||
 +            (name.find(".img_mlp.net.2.weight") != std::string::npos) ||
-+            (name.find(".txt_mlp.net.0.proj.weight") != std::string::npos)
++            (name.find(".txt_mlp.net.2.weight") != std::string::npos)
 +        ) {
 +            // TODO: add back `layer_info` with some model specific logic + logic further down
 +            if (ftype == LLAMA_FTYPE_MOSTLY_Q3_K_M) {
