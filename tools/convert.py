@@ -139,8 +139,14 @@ class ModelSD1(ModelTemplate):
         ), # Non-diffusers
     ]
 
-# The architectures are checked in order and the first successful match terminates the search.
-arch_list = [ModelFlux, ModelSD3, ModelAura, ModelHiDream, CosmosPredict2, ModelLTXV, ModelHyVid, ModelWan, ModelSDXL, ModelSD1]
+class ModelLumina2(ModelTemplate):
+    arch = "lumina2"
+    keys_detect = [
+        ("cap_embedder.1.weight", "context_refiner.0.attention.qkv.weight")
+    ]
+
+arch_list = [ModelFlux, ModelSD3, ModelAura, ModelHiDream, CosmosPredict2, 
+             ModelLTXV, ModelHyVid, ModelWan, ModelSDXL, ModelSD1, ModelLumina2]
 
 def is_model_arch(model, state_dict):
     # check if model is correct
@@ -356,3 +362,4 @@ def convert_file(path, dst_path=None, interact=True, overwrite=False):
 if __name__ == "__main__":
     args = parse_args()
     convert_file(args.src, args.dst)
+
