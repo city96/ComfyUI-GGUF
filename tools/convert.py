@@ -144,11 +144,6 @@ class ModelLumina2(ModelTemplate):
     keys_detect = [
         ("cap_embedder.1.weight", "context_refiner.0.attention.qkv.weight")
     ]
-    keys_hiprec = [
-        # nn.parameter, can't load from BF16 ver
-        ".adaLN_modulation.1.bias",
-        ".adaLN_modulation.1.weight"
-    ]
 
 arch_list = [ModelFlux, ModelSD3, ModelAura, ModelHiDream, CosmosPredict2, 
              ModelLTXV, ModelHyVid, ModelWan, ModelSDXL, ModelSD1, ModelLumina2]
@@ -367,3 +362,4 @@ def convert_file(path, dst_path=None, interact=True, overwrite=False):
 if __name__ == "__main__":
     args = parse_args()
     convert_file(args.src, args.dst)
+
