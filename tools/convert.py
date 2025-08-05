@@ -24,18 +24,18 @@ class ModelTemplate:
 class ModelFlux(ModelTemplate):
     arch = "flux"
     keys_detect = [
-        ("transformer_blocks.0.attn.norm_added_k.weight",),
+        ("single_transformer_blocks.0.attn.norm_k.weight",),
         ("double_blocks.0.img_attn.proj.weight",),
     ]
-    keys_banned = ["transformer_blocks.0.attn.norm_added_k.weight",]
+    keys_banned = ["single_transformer_blocks.0.attn.norm_k.weight",]
 
 class ModelSD3(ModelTemplate):
     arch = "sd3"
     keys_detect = [
-        ("transformer_blocks.0.attn.add_q_proj.weight",),
+        ("transformer_blocks.0.ff_context.net.0.proj.weight",),
         ("joint_blocks.0.x_block.attn.qkv.weight",),
     ]
-    keys_banned = ["transformer_blocks.0.attn.add_q_proj.weight",]
+    keys_banned = ["transformer_blocks.0.ff_context.net.0.proj.weight",]
 
 class ModelAura(ModelTemplate):
     arch = "aura"
@@ -59,7 +59,7 @@ class ModelHiDream(ModelTemplate):
         "img_emb.emb_pos"
     ]
 
-class CosmosPredict2(ModelTemplate):
+class ModelCosmosPredict2(ModelTemplate):
     arch = "cosmos"
     keys_detect = [
         (
@@ -69,6 +69,16 @@ class CosmosPredict2(ModelTemplate):
     ]
     keys_hiprec = ["pos_embedder"]
     keys_ignore = ["_extra_state", "accum_"]
+
+class ModelQwenImage(ModelTemplate):
+    arch = "qwen_image"
+    keys_detect = [
+        (
+            "time_text_embed.timestep_embedder.linear_2.weight",
+            "transformer_blocks.0.attn.norm_added_q.weight",
+            "transformer_blocks.0.img_mlp.net.0.proj.weight",
+        )
+    ]
 
 class ModelHyVid(ModelTemplate):
     arch = "hyvid"
@@ -136,8 +146,11 @@ class ModelLumina2(ModelTemplate):
         ("cap_embedder.1.weight", "context_refiner.0.attention.qkv.weight")
     ]
 
-arch_list = [ModelFlux, ModelSD3, ModelAura, ModelHiDream, CosmosPredict2, 
-             ModelLTXV, ModelHyVid, ModelWan, ModelSDXL, ModelSD1, ModelLumina2]
+# The architectures are checked in order and the first successful match terminates the search.
+arch_list = [
+    ModelFlux, ModelSD3, ModelAura, ModelHiDream, ModelCosmosPredict2, ModelQwenImage,
+    ModelLTXV, ModelHyVid, ModelWan, ModelSDXL, ModelSD1, ModelLumina2
+]
 
 def is_model_arch(model, state_dict):
     # check if model is correct
@@ -148,7 +161,7 @@ def is_model_arch(model, state_dict):
             matched = True
             invalid = any(key in state_dict for key in model.keys_banned)
             break
-    assert not invalid, "Model architecture not allowed for conversion! (i.e. reference VS diffusers format)"
+    assert not invalid, f"Model architecture not allowed for conversion! (i.e. reference VS diffusers format) [arch:{model.arch}]"
     return matched
 
 def detect_arch(state_dict):
@@ -377,4 +390,3 @@ def convert_file(path, dst_path=None, interact=True, overwrite=False, allow_fp32
 if __name__ == "__main__":
     args = parse_args()
     convert_file(args.src, args.dst)
-
