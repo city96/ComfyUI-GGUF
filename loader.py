@@ -3,6 +3,7 @@ import warnings
 import logging
 import torch
 import gguf
+import re
 import os
 
 from .ops import GGMLTensor
@@ -202,6 +203,13 @@ def llama_permute(raw_sd, n_head, n_head_kv):
         sd[k] = v
     return sd
 
+def strip_quant_suffix(name):
+    pattern = r"[-_]?(?:ud-)?i?q[0-9]_[a-z0-9_\-]{1,8}$"
+    match = re.search(pattern, name, re.IGNORECASE)
+    if match:
+        name = name[:match.start()]
+    return name
+
 def gguf_mmproj_loader(path):
     # Reverse version of Qwen2VLVisionModel.modify_tensors
     logging.info("Attenpting to find mmproj file for text encoder...")
@@ -209,11 +217,7 @@ def gguf_mmproj_loader(path):
     # get name to match w/o quant suffix
     tenc_fname = os.path.basename(path)
     tenc = os.path.splitext(tenc_fname)[0].lower()
-    for q in [x.name for x in gguf.GGMLQuantizationType]:
-        if q.lower() in tenc:
-            tenc = tenc.rsplit(q.lower(), 1)[0]
-            break
-    tenc = tenc[:-1] # dash/underscore/etc
+    tenc = strip_quant_suffix(tenc)
 
     # try and find matching mmproj
     target = []
@@ -228,7 +232,7 @@ def gguf_mmproj_loader(path):
             target.append(fname)
 
     if len(target) == 0:
-        logging.error(f"Error: Can't find mmproj file for '{tenc_fname}'! Qwen-Image-Edit will be broken!")
+        logging.error(f"Error: Can't find mmproj file for '{tenc_fname}' (matching:'{tenc}')! Qwen-Image-Edit will be broken!")
         return {}
     if len(target) > 1:
         logging.error(f"Ambiguous mmproj for text encoder '{tenc_fname}', will use first match.")
