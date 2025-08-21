@@ -330,7 +330,6 @@ def gguf_clip_loader(path, **kwargs):
             sd = llama_permute(sd, 32, 8) # L3
         if arch == "qwen2vl":
             mmproj_path = kwargs.get("mmproj_path", None)
-            print(f">>> path: {path}, mmproj_path: {mmproj_path}")
             vsd = gguf_mmproj_loader(path, mmproj_path)
             sd.update(vsd)
     else:
