@@ -184,7 +184,7 @@ class CLIPLoaderGGUF:
                 "type": [(*base["required"]["type"][0], "qwen_image_edit",)],
             },
             "optional": {
-                "mmproj_path": ("STRING", {"default": ""})
+                "mmproj_path": (s.get_filename_list(),)
             }
         }
 

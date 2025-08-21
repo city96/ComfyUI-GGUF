@@ -15,16 +15,7 @@ app.registerExtension({
 				const updateWidgets = (type) => {
 					const existingWidget = node.widgets.find((w) => w.name === "mmproj_path");
 					if (existingWidget) {
-						node.widgets.splice(node.widgets.indexOf(existingWidget), 1);
-					}
-
-					if (type === "qwen_image_edit") {
-						const newWidget = node.addWidget(
-							"string",
-							"mmproj_path",
-							"",
-							(value) => {},
-						);
+						existingWidget.hidden = (type !== "qwen_image_edit")
 					}
 					const newSize = node.computeSize();
 					node.size = newSize;
