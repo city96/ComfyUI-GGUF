@@ -101,7 +101,11 @@ class ModelWan(ModelTemplate):
         )
     ]
     keys_hiprec = [
-        ".modulation" # nn.parameter, can't load from BF16 ver
+        ".modulation", # nn.parameter, can't load from BF16 ver
+        ".encoder.padding_tokens", # nn.parameter, specific to S2V
+        "trainable_cond_mask", # used directly w/ .weight
+        "casual_audio_encoder.weights", # nn.parameter, specific to S2V
+        "casual_audio_encoder.encoder.conv", # CausalConv1d doesn't use ops.py for now
     ]
 
 class ModelLTXV(ModelTemplate):

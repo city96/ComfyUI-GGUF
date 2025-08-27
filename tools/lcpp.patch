@@ -39,7 +39,7 @@ index b16c462f..6d1568f1 100644
      const int idx = gguf_find_tensor(ctx, name);
      if (idx < 0) {
 diff --git a/src/llama.cpp b/src/llama.cpp
-index 24e1f1f0..19fdc5df 100644
+index 24e1f1f0..569778fd 100644
 --- a/src/llama.cpp
 +++ b/src/llama.cpp
 @@ -205,6 +205,18 @@ enum llm_arch {
@@ -348,7 +348,7 @@ index 24e1f1f0..19fdc5df 100644
      }
  
      // Set split info if needed
-@@ -18647,6 +18902,118 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
+@@ -18647,6 +18902,124 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
          // do not quantize relative position bias (T5)
          quantize &= name.find("attn_rel_b.weight") == std::string::npos;
  
@@ -423,6 +423,12 @@ index 24e1f1f0..19fdc5df 100644
 +            quantize &= name.find("time_embedding.") == std::string::npos;
 +            quantize &= name.find("img_emb.") == std::string::npos;
 +            quantize &= name.find("head.") == std::string::npos;
++            // S2V
++            quantize &= name.find("cond_encoder.") == std::string::npos;
++            quantize &= name.find("frame_packer.") == std::string::npos;
++            quantize &= name.find("audio_injector.") == std::string::npos;
++            quantize &= name.find("casual_audio_encoder.") == std::string::npos;
++            quantize &= name.find("trainable_cond_mask.") == std::string::npos;
 +        }
 +        if (model.arch == LLM_ARCH_HIDREAM) {
 +            image_model = true;
@@ -467,7 +473,7 @@ index 24e1f1f0..19fdc5df 100644
          enum ggml_type new_type;
          void * new_data;
          size_t new_size;
-@@ -18655,6 +19022,9 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
+@@ -18655,6 +19028,9 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
              new_type = default_type;
  
              // get more optimal quantization type based on the tensor shape, layer, etc.
@@ -477,7 +483,7 @@ index 24e1f1f0..19fdc5df 100644
              if (!params->pure && ggml_is_quantized(default_type)) {
                  new_type = llama_tensor_get_type(qs, new_type, tensor, ftype);
              }
-@@ -18664,6 +19034,7 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
+@@ -18664,6 +19040,7 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
              if (params->output_tensor_type < GGML_TYPE_COUNT && strcmp(tensor->name, "output.weight") == 0) {
                  new_type = params->output_tensor_type;
              }
