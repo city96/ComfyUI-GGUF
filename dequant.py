@@ -3,6 +3,14 @@ import gguf
 import torch
 from tqdm import tqdm
 
+ALLOW_TRITON = True
+try:
+    from . import dequant_triton
+    triton_dequantize_functions=dequant_triton.dequantize_functions
+except Exception as exc:
+    print(f"\nGGUF: Failed to enable Triton: {exc}")
+    triton_dequantize_functions={}
+
 
 TORCH_COMPATIBLE_QTYPES = (None, gguf.GGMLQuantizationType.F32, gguf.GGMLQuantizationType.F16)
 
@@ -18,7 +26,7 @@ def dequantize_tensor(tensor, dtype=None, dequant_dtype=None):
 
     if qtype in TORCH_COMPATIBLE_QTYPES:
         return tensor.to(dtype)
-    elif qtype in dequantize_functions:
+    if qtype in dequantize_functions:
         dequant_dtype = dtype if dequant_dtype == "target" else dequant_dtype
         return dequantize(tensor.data, qtype, oshape, dtype=dequant_dtype).to(dtype)
     else:
@@ -32,7 +40,7 @@ def dequantize(data, qtype, oshape, dtype=None):
     Dequantize tensor back to usable shape/dtype
     """
     block_size, type_size = gguf.GGML_QUANT_SIZES[qtype]
-    dequantize_blocks = dequantize_functions[qtype]
+    dequantize_blocks = (ALLOW_TRITON and triton_dequantize_functions.get(qtype)) or dequantize_functions[qtype]
 
     rows = data.reshape(
         (-1, data.shape[-1])
