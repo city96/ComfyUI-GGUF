@@ -16,6 +16,8 @@ from .ops import GGMLOps, move_patch_to_device
 from .loader import gguf_sd_loader, gguf_clip_loader
 from .dequant import is_quantized, is_torch_compatible
 
+from . import dequant
+
 def update_folder_names_and_paths(key, targets=[]):
     # check for existing key
     base = folder_paths.folder_names_and_paths.get(key, ([], {}))
@@ -295,6 +297,32 @@ class QuadrupleCLIPLoaderGGUF(CLIPLoaderGGUF):
         clip_type = getattr(comfy.sd.CLIPType, type.upper(), comfy.sd.CLIPType.STABLE_DIFFUSION)
         return (self.load_patcher(clip_paths, clip_type, self.load_data(clip_paths)),)
 
+class GGUFTritonToggle:
+    @classmethod
+    def INPUT_TYPES(cls) -> dict:
+        return {
+            "required": {
+                "passthrough_model": ("MODEL",),
+                "enabled": (
+                    "BOOLEAN",
+                    {"default": bool(dequant.triton_dequantize_functions)},
+                )
+            }
+        }
+
+    TITLE = "Triton toggle (GGUF)"
+    RETURN_TYPES = ("MODEL",)
+    FUNCTION = "go"
+    CATEGORY = "hacks"
+
+    @classmethod
+    def go(cls, *, enabled: bool, passthrough_model: object) -> tuple[object]:
+        dequant.ALLOW_TRITON = dequant.triton_dequantize_functions and enabled
+        if enabled:
+            print(f"\nGGUF: Enabling Triton, supported quants: {tuple(dequant.triton_dequantize_functions)}")
+        return (passthrough_model.clone(),)
+
+
 NODE_CLASS_MAPPINGS = {
     "UnetLoaderGGUF": UnetLoaderGGUF,
     "CLIPLoaderGGUF": CLIPLoaderGGUF,
@@ -302,4 +330,5 @@ NODE_CLASS_MAPPINGS = {
     "TripleCLIPLoaderGGUF": TripleCLIPLoaderGGUF,
     "QuadrupleCLIPLoaderGGUF": QuadrupleCLIPLoaderGGUF,
     "UnetLoaderGGUFAdvanced": UnetLoaderGGUFAdvanced,
+    "GGUFTritonToggle": GGUFTritonToggle,
 }
