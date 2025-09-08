@@ -270,6 +270,125 @@ def dequantize_blocks_Q4_K_triton(
     key=["n_total_blocks"],
 )
 @triton.jit
+def dequantize_q5_k_kernel(
+    q_tensor_ptr,
+    out_tensor_ptr,
+    n_total_blocks,
+    QK_K: tl.constexpr,
+    TYPE_SIZE: tl.constexpr,
+    K_SCALE_SIZE: tl.constexpr,
+    OUT_DTYPE: tl.constexpr,
+    N_BLOCKS_PER_PROG: tl.constexpr,
+):
+    pid = tl.program_id(axis=0)
+    start_block_idx = pid * N_BLOCKS_PER_PROG
+
+    offsets_32 = tl.arange(0, 32)
+
+    for i in range(N_BLOCKS_PER_PROG):
+        current_block_idx = start_block_idx + i
+        if current_block_idx < n_total_blocks:
+            # Pointers and initial loads
+            block_start_ptr = q_tensor_ptr + current_block_idx * TYPE_SIZE
+            output_start_ptr = out_tensor_ptr + current_block_idx * QK_K
+            d = tl.load(block_start_ptr.to(tl.pointer_type(tl.float16))).to(tl.float32)
+            dmin = tl.load((block_start_ptr + 2).to(tl.pointer_type(tl.float16))).to(
+                tl.float32
+            )
+
+            scales_ptr_u32 = (block_start_ptr + 4).to(tl.pointer_type(tl.uint32))
+            d_sc_word = tl.load(scales_ptr_u32 + 0)
+            m_word = tl.load(scales_ptr_u32 + 1)
+            m_sc_word = tl.load(scales_ptr_u32 + 2)
+
+            qh_start_ptr = block_start_ptr + 4 + K_SCALE_SIZE
+            qs_start_ptr = qh_start_ptr + QK_K // 8
+
+            qh_bytes_all = tl.load(qh_start_ptr + offsets_32)
+
+            # Process in 8 chunks of 32 values
+            for chunk_idx in range(8):
+                # 1. Unpack scale and min for this chunk
+                if chunk_idx < 4:
+                    sc = ((d_sc_word >> (chunk_idx * 8)) & 0xFF) & 0x3F
+                    m = ((m_word >> (chunk_idx * 8)) & 0xFF) & 0x3F
+                else:
+                    k_prime = chunk_idx - 4
+                    d_sc_byte = (d_sc_word >> (k_prime * 8)) & 0xFF
+                    m_byte = (m_word >> (k_prime * 8)) & 0xFF
+                    m_sc_byte = (m_sc_word >> (k_prime * 8)) & 0xFF
+                    sc = (m_sc_byte & 0x0F) | ((d_sc_byte >> 2) & 0x30)
+                    m = (m_sc_byte >> 4) | ((m_byte >> 2) & 0x30)
+
+                final_d = d * sc.to(tl.float32)
+                final_dm = dmin * m.to(tl.float32)
+
+                # 2. Unpack ql (lower 4 bits) for this chunk
+                qs_byte_offset = (chunk_idx // 2) * 32
+                qs_bytes = tl.load(qs_start_ptr + qs_byte_offset + offsets_32)
+                use_low_nibbles = chunk_idx % 2 == 0
+                ql = tl.where(use_low_nibbles, qs_bytes & 0x0F, qs_bytes >> 4)
+
+                # 3. Unpack qh (higher 1 bit) for this chunk
+                qh = (qh_bytes_all >> chunk_idx) & 0x01
+
+                # 4. Combine, dequantize, and store
+                q = ql.to(tl.uint8) | (qh.to(tl.uint8) << 4)
+                dequant_32 = final_d * q.to(tl.float32) - final_dm
+
+                output_ptr = output_start_ptr + chunk_idx * 32
+                tl.store(output_ptr + offsets_32, dequant_32)
+
+
+def dequantize_blocks_Q5_K_triton(
+    blocks: torch.Tensor,
+    block_size: int,
+    type_size: int,
+    dtype=None,
+) -> torch.Tensor:
+    assert blocks.dtype == torch.uint8 and blocks.is_cuda and blocks.is_contiguous()
+
+    n_elements = blocks.numel()
+    assert n_elements % type_size == 0
+    n_total_blocks = n_elements // type_size
+
+    dtype = dtype or torch.float32
+    triton_dtype = TORCH_TO_TRITON_DTYPE_MAP.get(dtype)
+    if triton_dtype is None:
+        raise TypeError(f"Unsupported output dtype {dtype}")
+
+    out_tensor = torch.empty(
+        (n_total_blocks * QK_K,), dtype=dtype, device=blocks.device
+    )
+
+    def grid(meta):
+        return (triton.cdiv(n_total_blocks, meta["N_BLOCKS_PER_PROG"]),)
+
+    dequantize_q5_k_kernel[grid](
+        blocks,
+        out_tensor,
+        n_total_blocks,
+        QK_K=QK_K,
+        TYPE_SIZE=type_size,
+        K_SCALE_SIZE=K_SCALE_SIZE,
+        OUT_DTYPE=triton_dtype,
+    )
+
+    return out_tensor.reshape(n_total_blocks, -1)
+
+
+@triton.autotune(
+    configs=[
+        triton.Config({"N_BLOCKS_PER_PROG": 1}, num_warps=4),
+        triton.Config({"N_BLOCKS_PER_PROG": 2}, num_warps=4),
+        triton.Config({"N_BLOCKS_PER_PROG": 4}, num_warps=4),
+        triton.Config({"N_BLOCKS_PER_PROG": 1}, num_warps=8),
+        triton.Config({"N_BLOCKS_PER_PROG": 2}, num_warps=8),
+        triton.Config({"N_BLOCKS_PER_PROG": 4}, num_warps=8),
+    ],
+    key=["n_total_blocks"],
+)
+@triton.jit
 def dequantize_q6_k_kernel(
     q_tensor_ptr,
     out_tensor_ptr,
@@ -378,6 +497,7 @@ dequantize_functions = {
     # Q8_0 simply seems than the PyTorch implementation.
     # gguf.GGMLQuantizationType.Q8_0: dequantize_blocks_Q8_0_triton,
     gguf.GGMLQuantizationType.Q4_K: dequantize_blocks_Q4_K_triton,
+    # gguf.GGMLQuantizationType.Q5_K: dequantize_blocks_Q5_K_triton,
     gguf.GGMLQuantizationType.Q6_K: dequantize_blocks_Q6_K_triton,
 }
 
