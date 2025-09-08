@@ -40,6 +40,8 @@ def dequantize_q8_0_kernel(
     N_BLOCKS_PER_PROG: tl.constexpr,  # How many blocks each program handles
     OUT_DTYPE: tl.constexpr,
 ):
+    out_dtype = OUT_DTYPE.value
+
     # Each program is responsible for a chunk of N_BLOCKS_PER_PROG blocks
     pid = tl.program_id(axis=0)
 
@@ -62,7 +64,7 @@ def dequantize_q8_0_kernel(
             uint16_ptr = block_start_ptr.to(tl.pointer_type(tl.uint16))
             uint16_val = tl.load(uint16_ptr)
             scale_fp16 = tl.cast(uint16_val, tl.float16, bitcast=True)
-            scale = scale_fp16.to(tl.float32)
+            scale = scale_fp16.to(out_dtype)
 
             # Load weights (x)
             q_weights_ptr = block_start_ptr + 2
@@ -70,7 +72,7 @@ def dequantize_q8_0_kernel(
             q_weights = uint8_weights.to(tl.int8)
 
             # Dequantize
-            dequantized_weights = q_weights.to(OUT_DTYPE) * scale
+            dequantized_weights = q_weights.to(out_dtype) * scale
 
             # Store the result
             output_start_ptr = out_tensor_ptr + current_block_idx * GGUF_BLOCK_SIZE
@@ -83,14 +85,11 @@ def dequantize_blocks_Q8_0_triton(
     type_size: int,
     dtype=None,
 ) -> torch.Tensor:
-    GGUF_BLOCK_SIZE = 32
-    GGUF_TYPE_SIZE = 34
-
     assert blocks.dtype == torch.uint8 and blocks.is_cuda and blocks.is_contiguous()
 
     n_elements = blocks.numel()
-    assert n_elements % GGUF_TYPE_SIZE == 0
-    n_total_blocks = n_elements // GGUF_TYPE_SIZE
+    assert n_elements % type_size == 0
+    n_total_blocks = n_elements // type_size
 
     dtype = dtype or torch.float32
     triton_dtype = TORCH_TO_TRITON_DTYPE_MAP.get(dtype)
@@ -98,7 +97,7 @@ def dequantize_blocks_Q8_0_triton(
         raise TypeError(f"Unsupported output dtype {dtype}")
 
     out_tensor = torch.empty(
-        (n_total_blocks * GGUF_BLOCK_SIZE,),
+        (n_total_blocks * block_size,),
         dtype=dtype,
         device=blocks.device,
     )
@@ -110,8 +109,8 @@ def dequantize_blocks_Q8_0_triton(
         blocks,
         out_tensor,
         n_total_blocks,
-        GGUF_BLOCK_SIZE=GGUF_BLOCK_SIZE,
-        GGUF_TYPE_SIZE=GGUF_TYPE_SIZE,
+        GGUF_BLOCK_SIZE=block_size,
+        GGUF_TYPE_SIZE=type_size,
         OUT_DTYPE=triton_dtype,
     )
 
@@ -140,6 +139,7 @@ def dequantize_q4_k_kernel(
     N_BLOCKS_PER_PROG: tl.constexpr,
     OUT_DTYPE: tl.constexpr,
 ):
+    out_dtype = OUT_DTYPE.value
     pid = tl.program_id(axis=0)
     start_block_idx = pid * N_BLOCKS_PER_PROG
 
@@ -152,9 +152,9 @@ def dequantize_q4_k_kernel(
             block_start_ptr = q_tensor_ptr + current_block_idx * TYPE_SIZE
             output_start_ptr = out_tensor_ptr + current_block_idx * QK_K
 
-            d = tl.load(block_start_ptr.to(tl.pointer_type(tl.float16))).to(OUT_DTYPE)
+            d = tl.load(block_start_ptr.to(tl.pointer_type(tl.float16))).to(out_dtype)
             dmin = tl.load((block_start_ptr + 2).to(tl.pointer_type(tl.float16))).to(
-                OUT_DTYPE
+                out_dtype
             )
 
             scales_ptr_u32 = (block_start_ptr + 4).to(tl.pointer_type(tl.uint32))
@@ -198,27 +198,25 @@ def dequantize_q4_k_kernel(
                     sc_b = (m_sc_byte_b & 0x0F) | ((d_sc_byte_b >> 2) & 0x30)
                     m_b = (m_sc_byte_b >> 4) | ((m_byte_b >> 2) & 0x30)
 
-                current_d_a = d * sc_a.to(OUT_DTYPE)
-                current_dm_a = dmin * m_a.to(OUT_DTYPE)
-                current_d_b = d * sc_b.to(OUT_DTYPE)
-                current_dm_b = dmin * m_b.to(OUT_DTYPE)
+                current_d_a = d * sc_a.to(out_dtype)
+                current_dm_a = dmin * m_a.to(out_dtype)
+                current_d_b = d * sc_b.to(out_dtype)
+                current_dm_b = dmin * m_b.to(out_dtype)
 
                 # Load 32 bytes of quantized data
                 chunk_qs_ptr = qs_start_ptr + k_chunk * 32
                 qs_bytes_chunk = tl.load(chunk_qs_ptr + qs_chunk_offsets)
 
-                qs_low = (qs_bytes_chunk & 0x0F).to(OUT_DTYPE)
-                qs_high = (qs_bytes_chunk >> 4).to(OUT_DTYPE)
+                qs_low = (qs_bytes_chunk & 0x0F).to(out_dtype)
+                qs_high = (qs_bytes_chunk >> 4).to(out_dtype)
 
                 dequant_low = current_d_a * qs_low - current_dm_a
                 dequant_high = current_d_b * qs_high - current_dm_b
 
                 # Store results contiguously
                 output_chunk_ptr = output_start_ptr + k_chunk * 64
-                tl.store(output_chunk_ptr + store_offsets, dequant_low.to(OUT_DTYPE))
-                tl.store(
-                    output_chunk_ptr + 32 + store_offsets, dequant_high.to(OUT_DTYPE)
-                )
+                tl.store(output_chunk_ptr + store_offsets, dequant_low)
+                tl.store(output_chunk_ptr + 32 + store_offsets, dequant_high)
 
 
 def dequantize_blocks_Q4_K_triton(
@@ -280,6 +278,7 @@ def dequantize_q5_k_kernel(
     OUT_DTYPE: tl.constexpr,
     N_BLOCKS_PER_PROG: tl.constexpr,
 ):
+    out_dtype = OUT_DTYPE.value
     pid = tl.program_id(axis=0)
     start_block_idx = pid * N_BLOCKS_PER_PROG
 
@@ -291,9 +290,9 @@ def dequantize_q5_k_kernel(
             # Pointers and initial loads
             block_start_ptr = q_tensor_ptr + current_block_idx * TYPE_SIZE
             output_start_ptr = out_tensor_ptr + current_block_idx * QK_K
-            d = tl.load(block_start_ptr.to(tl.pointer_type(tl.float16))).to(tl.float32)
+            d = tl.load(block_start_ptr.to(tl.pointer_type(tl.float16))).to(out_dtype)
             dmin = tl.load((block_start_ptr + 2).to(tl.pointer_type(tl.float16))).to(
-                tl.float32
+                out_dtype
             )
 
             scales_ptr_u32 = (block_start_ptr + 4).to(tl.pointer_type(tl.uint32))
@@ -320,8 +319,8 @@ def dequantize_q5_k_kernel(
                     sc = (m_sc_byte & 0x0F) | ((d_sc_byte >> 2) & 0x30)
                     m = (m_sc_byte >> 4) | ((m_byte >> 2) & 0x30)
 
-                final_d = d * sc.to(tl.float32)
-                final_dm = dmin * m.to(tl.float32)
+                final_d = d * sc.to(out_dtype)
+                final_dm = dmin * m.to(out_dtype)
 
                 # 2. Unpack ql (lower 4 bits) for this chunk
                 qs_byte_offset = (chunk_idx // 2) * 32
@@ -334,7 +333,7 @@ def dequantize_q5_k_kernel(
 
                 # 4. Combine, dequantize, and store
                 q = ql.to(tl.uint8) | (qh.to(tl.uint8) << 4)
-                dequant_32 = final_d * q.to(tl.float32) - final_dm
+                dequant_32 = final_d * q.to(out_dtype) - final_dm
 
                 output_ptr = output_start_ptr + chunk_idx * 32
                 tl.store(output_ptr + offsets_32, dequant_32)
@@ -398,6 +397,7 @@ def dequantize_q6_k_kernel(
     OUT_DTYPE: tl.constexpr,
     N_BLOCKS_PER_PROG: tl.constexpr,
 ):
+    out_dtype = OUT_DTYPE.value
     pid = tl.program_id(axis=0)
     start_block_idx = pid * N_BLOCKS_PER_PROG
     offsets_32 = tl.arange(0, 32)
@@ -411,9 +411,7 @@ def dequantize_q6_k_kernel(
 
             d_ptr = block_start_ptr + 208
             scales_ptr = block_start_ptr + 192
-            d_super_scale = tl.load(d_ptr.to(tl.pointer_type(tl.float16))).to(
-                tl.float32
-            )
+            d_super_scale = tl.load(d_ptr.to(tl.pointer_type(tl.float16))).to(out_dtype)
 
             # Process block in 8 chunks of 32 values
             for chunk_idx in range(8):
@@ -442,15 +440,11 @@ def dequantize_q6_k_kernel(
                 # 4. Load and apply correct scales
                 scale_0_ptr = scales_ptr + chunk_idx * 2
                 scale_1_ptr = scales_ptr + chunk_idx * 2 + 1
-                scale_0 = d_super_scale * tl.load(scale_0_ptr).to(tl.int8).to(
-                    tl.float32
-                )
-                scale_1 = d_super_scale * tl.load(scale_1_ptr).to(tl.int8).to(
-                    tl.float32
-                )
+                scale_0 = d_super_scale * tl.load(scale_0_ptr).to(tl.int8).to(out_dtype)
+                scale_1 = d_super_scale * tl.load(scale_1_ptr).to(tl.int8).to(out_dtype)
 
                 scales_32 = tl.where(mask_16, scale_0, scale_1)
-                dequant_32 = q_vec_32.to(OUT_DTYPE) * scales_32
+                dequant_32 = q_vec_32.to(out_dtype) * scales_32
 
                 # 5. Store result
                 output_ptr = output_start_ptr + chunk_idx * 32
