@@ -497,7 +497,7 @@ dequantize_functions = {
     # Q8_0 simply seems than the PyTorch implementation.
     # gguf.GGMLQuantizationType.Q8_0: dequantize_blocks_Q8_0_triton,
     gguf.GGMLQuantizationType.Q4_K: dequantize_blocks_Q4_K_triton,
-    # gguf.GGMLQuantizationType.Q5_K: dequantize_blocks_Q5_K_triton,
+    gguf.GGMLQuantizationType.Q5_K: dequantize_blocks_Q5_K_triton,
     gguf.GGMLQuantizationType.Q6_K: dequantize_blocks_Q6_K_triton,
 }
 
