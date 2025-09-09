@@ -117,6 +117,28 @@ def dequantize_blocks_Q8_0_triton(
     return out_tensor.reshape(n_total_blocks, -1)
 
 
+@triton.jit
+def dequantize_q4_k_get_scales_min(
+    k_idx: int,
+    d_sc_word: tl.tensor,
+    m_word: tl.tensor,
+    m_sc_word: tl.tensor,
+) -> tuple[tl.tensor, tl.tensor]:
+    if k_idx < 4:
+        k_idx_x8 = k_idx * 8
+        d_sc_byte = d_sc_word >> k_idx_x8
+        m_byte = m_word >> k_idx_x8
+        return d_sc_byte & 0x3F, m_byte & 0x3F
+
+    k_prime_x8 = (k_idx - 4) * 8
+    d_sc_byte = d_sc_word >> k_prime_x8
+    m_byte = m_word >> k_prime_x8
+    m_sc_byte = (m_sc_word >> k_prime_x8) & 0xFF
+    sc = (m_sc_byte & 0x0F) | ((d_sc_byte >> 2) & 0x30)
+    m = (m_sc_byte >> 4) | ((m_byte >> 2) & 0x30)
+    return sc, m
+
+
 @triton.autotune(
     configs=[
         triton.Config({"N_BLOCKS_PER_PROG": 1}, num_warps=4),
@@ -133,11 +155,11 @@ def dequantize_q4_k_kernel(
     q_tensor_ptr,
     out_tensor_ptr,
     n_total_blocks,
-    QK_K: tl.constexpr,
-    TYPE_SIZE: tl.constexpr,
-    K_SCALE_SIZE: tl.constexpr,
-    N_BLOCKS_PER_PROG: tl.constexpr,
     OUT_DTYPE: tl.constexpr,
+    TYPE_SIZE: tl.constexpr,
+    N_BLOCKS_PER_PROG: tl.constexpr,
+    QK_K: tl.constexpr = QK_K,
+    K_SCALE_SIZE: tl.constexpr = K_SCALE_SIZE,
 ):
     out_dtype = OUT_DTYPE.value
     pid = tl.program_id(axis=0)
@@ -166,37 +188,17 @@ def dequantize_q4_k_kernel(
 
             # Process in 4 chunks of 64 values
             for k_chunk in tl.static_range(4):
-                # Scale indices for low (a) and high (b) nibbles
-                k_idx_a = 2 * k_chunk
-                k_idx_b = 2 * k_chunk + 1
+                k_idx = 2 * k_chunk
 
-                # --- Calculate Scale A (for low nibbles) ---
-                if k_idx_a < 4:
-                    d_sc_byte_a = (d_sc_word >> (k_idx_a * 8)) & 0xFF
-                    m_byte_a = (m_word >> (k_idx_a * 8)) & 0xFF
-                    sc_a = d_sc_byte_a & 0x3F
-                    m_a = m_byte_a & 0x3F
-                else:
-                    k_prime_a = k_idx_a - 4
-                    d_sc_byte_a = (d_sc_word >> (k_prime_a * 8)) & 0xFF
-                    m_byte_a = (m_word >> (k_prime_a * 8)) & 0xFF
-                    m_sc_byte_a = (m_sc_word >> (k_prime_a * 8)) & 0xFF
-                    sc_a = (m_sc_byte_a & 0x0F) | ((d_sc_byte_a >> 2) & 0x30)
-                    m_a = (m_sc_byte_a >> 4) | ((m_byte_a >> 2) & 0x30)
+                # --- Get scale A (for low nibbles) ---
+                sc_a, m_a = dequantize_q4_k_get_scales_min(
+                    k_idx, d_sc_word, m_word, m_sc_word
+                )
 
-                # --- Calculate Scale B (for high nibbles) ---
-                if k_idx_b < 4:
-                    d_sc_byte_b = (d_sc_word >> (k_idx_b * 8)) & 0xFF
-                    m_byte_b = (m_word >> (k_idx_b * 8)) & 0xFF
-                    sc_b = d_sc_byte_b & 0x3F
-                    m_b = m_byte_b & 0x3F
-                else:
-                    k_prime_b = k_idx_b - 4
-                    d_sc_byte_b = (d_sc_word >> (k_prime_b * 8)) & 0xFF
-                    m_byte_b = (m_word >> (k_prime_b * 8)) & 0xFF
-                    m_sc_byte_b = (m_sc_word >> (k_prime_b * 8)) & 0xFF
-                    sc_b = (m_sc_byte_b & 0x0F) | ((d_sc_byte_b >> 2) & 0x30)
-                    m_b = (m_sc_byte_b >> 4) | ((m_byte_b >> 2) & 0x30)
+                # --- Get scale B (for high nibbles) ---
+                sc_b, m_b = dequantize_q4_k_get_scales_min(
+                    k_idx + 1, d_sc_word, m_word, m_sc_word
+                )
 
                 current_d_a = d * sc_a.to(out_dtype)
                 current_dm_a = dmin * m_a.to(out_dtype)
@@ -247,9 +249,7 @@ def dequantize_blocks_Q4_K_triton(
         blocks,
         out_tensor,
         n_total_blocks,
-        QK_K=QK_K,
         TYPE_SIZE=type_size,
-        K_SCALE_SIZE=K_SCALE_SIZE,
         OUT_DTYPE=triton_dtype,
     )
 
