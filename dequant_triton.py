@@ -52,7 +52,7 @@ def dequantize_q8_0_kernel(
     weight_indices = tl.arange(0, GGUF_BLOCK_SIZE)
 
     # Loop over the N blocks assigned to this program
-    for i in range(N_BLOCKS_PER_PROG):
+    for i in tl.static_range(N_BLOCKS_PER_PROG):
         current_block_idx = start_block_idx + i
 
         # Boundary check to avoid processing padding blocks
@@ -146,7 +146,7 @@ def dequantize_q4_k_kernel(
     qs_chunk_offsets = tl.arange(0, 32)
     store_offsets = tl.arange(0, 32)
 
-    for i in range(N_BLOCKS_PER_PROG):
+    for i in tl.static_range(N_BLOCKS_PER_PROG):
         current_block_idx = start_block_idx + i
         if current_block_idx < n_total_blocks:
             block_start_ptr = q_tensor_ptr + current_block_idx * TYPE_SIZE
@@ -165,7 +165,7 @@ def dequantize_q4_k_kernel(
             qs_start_ptr = block_start_ptr + 4 + K_SCALE_SIZE
 
             # Process in 4 chunks of 64 values
-            for k_chunk in range(4):
+            for k_chunk in tl.static_range(4):
                 # Scale indices for low (a) and high (b) nibbles
                 k_idx_a = 2 * k_chunk
                 k_idx_b = 2 * k_chunk + 1
@@ -284,7 +284,7 @@ def dequantize_q5_k_kernel(
 
     offsets_32 = tl.arange(0, 32)
 
-    for i in range(N_BLOCKS_PER_PROG):
+    for i in tl.static_range(N_BLOCKS_PER_PROG):
         current_block_idx = start_block_idx + i
         if current_block_idx < n_total_blocks:
             # Pointers and initial loads
@@ -306,7 +306,7 @@ def dequantize_q5_k_kernel(
             qh_bytes_all = tl.load(qh_start_ptr + offsets_32)
 
             # Process in 8 chunks of 32 values
-            for chunk_idx in range(8):
+            for chunk_idx in tl.static_range(8):
                 # 1. Unpack scale and min for this chunk
                 if chunk_idx < 4:
                     sc = ((d_sc_word >> (chunk_idx * 8)) & 0xFF) & 0x3F
@@ -403,7 +403,7 @@ def dequantize_q6_k_kernel(
     offsets_32 = tl.arange(0, 32)
     mask_16 = offsets_32 < 16
 
-    for i in range(N_BLOCKS_PER_PROG):
+    for i in tl.static_range(N_BLOCKS_PER_PROG):
         current_block_idx = start_block_idx + i
         if current_block_idx < n_total_blocks:
             block_start_ptr = q_tensor_ptr + current_block_idx * TYPE_SIZE
@@ -414,7 +414,7 @@ def dequantize_q6_k_kernel(
             d_super_scale = tl.load(d_ptr.to(tl.pointer_type(tl.float16))).to(out_dtype)
 
             # Process block in 8 chunks of 32 values
-            for chunk_idx in range(8):
+            for chunk_idx in tl.static_range(8):
                 # 1. Calculate ql source data and unpack
                 ql_byte_offset = (chunk_idx % 2) * 32 + (chunk_idx // 4) * 64
                 ql_ptr = block_start_ptr + ql_byte_offset
