@@ -268,7 +268,7 @@ index 24e1f1f0..25db4c69 100644
      }
  
      size_t total_size_org = 0;
-@@ -18547,6 +18729,51 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
+@@ -18547,6 +18729,44 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
              ctx_outs[i_split] = gguf_init_empty();
          }
          gguf_add_tensor(ctx_outs[i_split], tensor);
@@ -295,13 +295,6 @@ index 24e1f1f0..25db4c69 100644
 +                LLAMA_LOG_INFO("\n%s: Correcting register_tokens shape for AuraFlow: [key:%s]\n", __func__, tensor->name);
 +            }
 +        }
-+        // conv3d fails due to max dims - unsure what to do here as we never even reach this check
-+        if (model.arch == LLM_ARCH_HYVID) {
-+            const std::string name = ggml_get_name(tensor);
-+            if (name == "img_in.proj.weight" && tensor->ne[5] != 1 ) {
-+                throw std::runtime_error("img_in.proj.weight size failed for HyVid");
-+            }
-+        }
 +        // All the modulation layers also have dim1, and I think conv3d fails here too but we segfaul way before that...
 +        if (model.arch == LLM_ARCH_WAN) {
 +            const std::string name = ggml_get_name(tensor);
@@ -320,7 +313,7 @@ index 24e1f1f0..25db4c69 100644
      }
  
      // Set split info if needed
-@@ -18647,6 +18874,110 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
+@@ -18647,6 +18874,111 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
          // do not quantize relative position bias (T5)
          quantize &= name.find("attn_rel_b.weight") == std::string::npos;
  
@@ -385,6 +378,7 @@ index 24e1f1f0..25db4c69 100644
 +            quantize &= name.find("vector_in.") == std::string::npos;
 +            quantize &= name.find("guidance_in.") == std::string::npos;
 +            quantize &= name.find("final_layer.") == std::string::npos;
++            quantize &= name.find("byt5_in.") == std::string::npos;
 +        }
 +        if (model.arch == LLM_ARCH_WAN) {
 +            image_model = true;
