@@ -15,6 +15,7 @@ import folder_paths
 from .ops import GGMLOps, move_patch_to_device
 from .loader import gguf_sd_loader, gguf_clip_loader
 from .dequant import is_quantized, is_torch_compatible
+from . import dequant
 
 from . import dequant
 
@@ -132,22 +133,39 @@ class UnetLoaderGGUF:
     CATEGORY = "bootleg"
     TITLE = "Unet Loader (GGUF)"
 
-    def load_unet(self, unet_name, dequant_dtype=None, patch_dtype=None, patch_on_device=None):
-        ops = GGMLOps()
+    def load_unet(self, unet_name, dequant_dtype=None, patch_dtype=None, patch_on_device=None, compile=False):
+        dequantize_function = dequantize_handlers = None
+        if compile:
+            compile_opts={}
+            try:
+                dequantize_function = torch.compile(dequant.dequantize, **compile_opts)
+                dequantize_handlers = {
+                    k: torch.compile(v, **compile_opts)
+                    for k, v in dequant.dequantize_functions.items()
+                }
+            except Exception as exc:
+                dequantize_function = dequantize_handlers = None
+                print(f"GGUF: Failed to compile dequant functions: {exc}")
 
-        if dequant_dtype in ("default", None):
-            ops.Linear.dequant_dtype = None
-        elif dequant_dtype in ["target"]:
-            ops.Linear.dequant_dtype = dequant_dtype
-        else:
-            ops.Linear.dequant_dtype = getattr(torch, dequant_dtype)
+        if dequant_dtype == "default":
+            dequant_dtype = None
+        elif dequant_dtype and dequant_dtype != "target":
+            dequant_dtype = getattr(torch, dequant_dtype)
+        if patch_dtype == "default":
+            patch_dtype = None
+        elif patch_dtype and patch_dtype != "target":
+            patch_dtype = getattr(torch, patch_dtype)
 
-        if patch_dtype in ("default", None):
-            ops.Linear.patch_dtype = None
-        elif patch_dtype in ["target"]:
-            ops.Linear.patch_dtype = patch_dtype
-        else:
-            ops.Linear.patch_dtype = getattr(torch, patch_dtype)
+        config = dequant.GGUFConfig(
+            dequant_dtype = dequant_dtype,
+            patch_dtype = patch_dtype,
+            patch_on_device = patch_on_device,
+            compile = compile,
+            dequantize_function = dequantize_function,
+            dequantize_handlers = dequantize_handlers,
+        )
+        print(f"\nGGUF: Using config {config}")
+        ops = GGMLOps(ggufconfig=config)
 
         # init model
         unet_path = folder_paths.get_full_path("unet", unet_name)
@@ -172,6 +190,7 @@ class UnetLoaderGGUFAdvanced(UnetLoaderGGUF):
                 "dequant_dtype": (["default", "target", "float32", "float16", "bfloat16"], {"default": "default"}),
                 "patch_dtype": (["default", "target", "float32", "float16", "bfloat16"], {"default": "default"}),
                 "patch_on_device": ("BOOLEAN", {"default": False}),
+                "compile": ("BOOLEAN", {"default": False, "tooltip": "When enabled, the GGUF dequantization functions will be compiled. This is generally a significant performance benefit."}),
             }
         }
     TITLE = "Unet Loader (GGUF/Advanced)"

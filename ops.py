@@ -1,4 +1,6 @@
 # (c) City96 || Apache-2.0 (apache.org/licenses/LICENSE-2.0)
+from typing import Optional
+
 import gguf
 import torch
 import logging
@@ -6,7 +8,7 @@ import logging
 import comfy.ops
 import comfy.lora
 import comfy.model_management
-from .dequant import dequantize_tensor, is_quantized
+from .dequant import DEFAULT_CONFIG, GGUFConfig, dequantize_tensor, is_quantized
 
 def chained_hasattr(obj, chained_attr):
     probe = obj
@@ -95,10 +97,7 @@ class GGMLLayer(torch.nn.Module):
     This (should) be responsible for de-quantizing on the fly
     """
     comfy_cast_weights = True
-    dequant_dtype = None
-    patch_dtype = None
     largest_layer = False
-    torch_compatible_tensor_types = {None, gguf.GGMLQuantizationType.F32, gguf.GGMLQuantizationType.F16}
 
     def is_ggml_quantized(self, *, weight=None, bias=None):
         if weight is None:
@@ -152,8 +151,9 @@ class GGMLLayer(torch.nn.Module):
 
         # Take into account space required for dequantizing the largest tensor
         if self.largest_layer:
+            dequant_dtype = self.ggufconfig.dequant_dtype
             shape = getattr(self.weight, "tensor_shape", self.weight.shape)
-            dtype = (self.dequant_dtype and self.dequant_dtype != "target") or torch.float16
+            dtype = (dequant_dtype != "target" and dequant_dtype) or torch.float16
             temp = torch.empty(*shape, device=torch.device("meta"), dtype=dtype)
             destination[prefix + "temp.weight"] = temp
 
@@ -166,29 +166,34 @@ class GGMLLayer(torch.nn.Module):
     def get_weight(self, tensor, dtype):
         if tensor is None:
             return
+        patch_dtype = self.ggufconfig.patch_dtype
 
         # consolidate and load patches to GPU in async
         patch_list = []
         device = tensor.device
+
+        key = patches = None
         for patches, key in getattr(tensor, "patches", []):
             patch_list += move_patch_to_device(patches, device)
 
         # dequantize tensor while patches load
-        weight = dequantize_tensor(tensor, dtype, self.dequant_dtype)
+        weight = dequantize_tensor(tensor, dtype, self.ggufconfig)
 
         # prevent propagating custom tensor class
         if isinstance(weight, GGMLTensor):
             weight = torch.Tensor(weight)
 
+        if key is None:
+            # Patch list was empty.
+            return weight
+
         # apply patches
-        if len(patch_list) > 0:
-            if self.patch_dtype is None:
-                weight = comfy.lora.calculate_weight(patch_list, weight, key)
-            else:
-                # for testing, may degrade image quality
-                patch_dtype = dtype if self.patch_dtype == "target" else self.patch_dtype
-                weight = comfy.lora.calculate_weight(patch_list, weight, key, patch_dtype)
-        return weight
+        if patch_dtype is None:
+            return comfy.lora.calculate_weight(patch_list, weight, key)
+
+        # for testing, may degrade image quality
+        patch_dtype = dtype if patch_dtype == "target" else patch_dtype
+        return comfy.lora.calculate_weight(patch_list, weight, key, patch_dtype)
 
     @torch_compiler_disable()
     def cast_bias_weight(s, input=None, dtype=None, device=None, bias_dtype=None):
@@ -224,10 +229,26 @@ class GGMLLayer(torch.nn.Module):
     def forward_ggml_cast_weights(self, input):
         raise NotImplementedError
 
+
 class GGMLOps(comfy.ops.manual_cast):
     """
     Dequantize weights on the fly before doing the compute
     """
+
+    _MODULE_NAMES = ("Linear", "Conv2d", "Embedding", "LayerNorm", "GroupNorm")
+
+    def __init__(self, *args, ggufconfig: Optional[GGUFConfig]=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        linear_config = ggufconfig or DEFAULT_CONFIG
+        # Ignore patch_dtype and dequant_dtype for non-Linear layers.
+        other_config = linear_config._replace(patch_dtype=None, dequant_dtype=None)
+        self.ggufconfig = linear_config
+        for module_name in self._MODULE_NAMES:
+            module = getattr(self.__class__, module_name)
+            curr_config = linear_config if module_name == "Linear" else other_config
+            setattr(self, module_name, type(module_name, (module,), {"ggufconfig": curr_config}))
+
+
     class Linear(GGMLLayer, comfy.ops.manual_cast.Linear):
         def __init__(self, in_features, out_features, bias=True, device=None, dtype=None):
             torch.nn.Module.__init__(self)

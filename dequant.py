@@ -1,4 +1,6 @@
 # (c) City96 || Apache-2.0 (apache.org/licenses/LICENSE-2.0)
+from typing import Callable, Literal, NamedTuple, Optional, Union
+
 import gguf
 import torch
 from tqdm import tqdm
@@ -14,33 +16,54 @@ except Exception as exc:
 
 TORCH_COMPATIBLE_QTYPES = (None, gguf.GGMLQuantizationType.F32, gguf.GGMLQuantizationType.F16)
 
+DequantizeHandlersType = dict[gguf.GGMLQuantizationType, Callable]
+DequantizeDtype = Optional[Union[torch.dtype, Literal["target"]]]
+
+class GGUFConfig(NamedTuple):
+    dequant_dtype: DequantizeDtype = None
+    patch_dtype: DequantizeDtype = None
+    patch_on_device: Optional[bool] = None
+    compile: bool = False,
+    dequantize_function: Optional[Callable] = None
+    dequantize_handlers: Optional[DequantizeHandlersType] = None
+
+DEFAULT_CONFIG = GGUFConfig()
+
 def is_torch_compatible(tensor):
     return tensor is None or getattr(tensor, "tensor_type", None) in TORCH_COMPATIBLE_QTYPES
 
 def is_quantized(tensor):
     return not is_torch_compatible(tensor)
 
-def dequantize_tensor(tensor, dtype=None, dequant_dtype=None):
+def dequantize_tensor(tensor, dtype=None, config: Optional[GGUFConfig]=None):
+    config = config or DEFAULT_CONFIG
     qtype = getattr(tensor, "tensor_type", None)
     oshape = getattr(tensor, "tensor_shape", tensor.shape)
 
     if qtype in TORCH_COMPATIBLE_QTYPES:
         return tensor.to(dtype)
     if qtype in dequantize_functions:
-        dequant_dtype = dtype if dequant_dtype == "target" else dequant_dtype
-        return dequantize(tensor.data, qtype, oshape, dtype=dequant_dtype).to(dtype)
-    else:
-        # this is incredibly slow
-        tqdm.write(f"Falling back to numpy dequant for qtype: {qtype}")
-        new = gguf.quants.dequantize(tensor.cpu().numpy(), qtype)
-        return torch.from_numpy(new).to(tensor.device, dtype=dtype)
+        # print(f"\nGGUF: DEQUANT: {qtype}: config={config}")
+        dequant_dtype = dtype if config.dequant_dtype == "target" else config.dequant_dtype
+        dequantize_function = config.dequantize_function or dequantize
+        return dequantize_function(
+            tensor.data,
+            qtype,
+            oshape,
+            dtype=dequant_dtype,
+            dequantize_functions_override=config.dequantize_handlers,
+        ).to(dtype)
+    # this is incredibly slow
+    tqdm.write(f"Falling back to numpy dequant for qtype: {qtype}")
+    new = gguf.quants.dequantize(tensor.cpu().numpy(), qtype)
+    return torch.from_numpy(new).to(tensor.device, dtype=dtype)
 
-def dequantize(data, qtype, oshape, dtype=None):
+def dequantize(data, qtype, oshape, dtype=None, dequantize_functions_override: Optional[DequantizeHandlersType]=None):
     """
     Dequantize tensor back to usable shape/dtype
     """
     block_size, type_size = gguf.GGML_QUANT_SIZES[qtype]
-    dequantize_blocks = (ALLOW_TRITON and triton_dequantize_functions.get(qtype)) or dequantize_functions[qtype]
+    dequantize_blocks = (dequantize_functions_override or dequantize_functions)[qtype]
 
     rows = data.reshape(
         (-1, data.shape[-1])
