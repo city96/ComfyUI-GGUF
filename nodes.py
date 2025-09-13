@@ -17,8 +17,6 @@ from .loader import gguf_sd_loader, gguf_clip_loader
 from .dequant import is_quantized, is_torch_compatible
 from . import dequant
 
-from . import dequant
-
 def update_folder_names_and_paths(key, targets=[]):
     # check for existing key
     base = folder_paths.folder_names_and_paths.get(key, ([], {}))
@@ -133,9 +131,9 @@ class UnetLoaderGGUF:
     CATEGORY = "bootleg"
     TITLE = "Unet Loader (GGUF)"
 
-    def load_unet(self, unet_name, dequant_dtype=None, patch_dtype=None, patch_on_device=None, compile=False):
+    def load_unet(self, unet_name, dequant_dtype=None, patch_dtype=None, patch_on_device=None, optimize="none"):
         dequantize_function = dequantize_handlers = None
-        if compile:
+        if optimize == "compile":
             compile_opts={}
             try:
                 dequantize_function = torch.compile(dequant.dequantize, **compile_opts)
@@ -146,6 +144,8 @@ class UnetLoaderGGUF:
             except Exception as exc:
                 dequantize_function = dequantize_handlers = None
                 print(f"GGUF: Failed to compile dequant functions: {exc}")
+        elif optimize == "triton":
+            dequantize_handlers = dequant.dequantize_functions | dequant.triton_dequantize_functions
 
         if dequant_dtype == "default":
             dequant_dtype = None
@@ -160,7 +160,7 @@ class UnetLoaderGGUF:
             dequant_dtype = dequant_dtype,
             patch_dtype = patch_dtype,
             patch_on_device = patch_on_device,
-            compile = compile,
+            optimize=optimize,
             dequantize_function = dequantize_function,
             dequantize_handlers = dequantize_handlers,
         )
@@ -190,7 +190,7 @@ class UnetLoaderGGUFAdvanced(UnetLoaderGGUF):
                 "dequant_dtype": (["default", "target", "float32", "float16", "bfloat16"], {"default": "default"}),
                 "patch_dtype": (["default", "target", "float32", "float16", "bfloat16"], {"default": "default"}),
                 "patch_on_device": ("BOOLEAN", {"default": False}),
-                "compile": ("BOOLEAN", {"default": False, "tooltip": "When enabled, the GGUF dequantization functions will be compiled. This is generally a significant performance benefit."}),
+                "optimize": (("none", "compile", "triton"), {"default": "none"}),
             }
         }
     TITLE = "Unet Loader (GGUF/Advanced)"
@@ -316,31 +316,6 @@ class QuadrupleCLIPLoaderGGUF(CLIPLoaderGGUF):
         clip_type = getattr(comfy.sd.CLIPType, type.upper(), comfy.sd.CLIPType.STABLE_DIFFUSION)
         return (self.load_patcher(clip_paths, clip_type, self.load_data(clip_paths)),)
 
-class GGUFTritonToggle:
-    @classmethod
-    def INPUT_TYPES(cls) -> dict:
-        return {
-            "required": {
-                "passthrough_model": ("MODEL",),
-                "enabled": (
-                    "BOOLEAN",
-                    {"default": bool(dequant.triton_dequantize_functions)},
-                )
-            }
-        }
-
-    TITLE = "Triton toggle (GGUF)"
-    RETURN_TYPES = ("MODEL",)
-    FUNCTION = "go"
-    CATEGORY = "hacks"
-
-    @classmethod
-    def go(cls, *, enabled: bool, passthrough_model: object) -> tuple[object]:
-        dequant.ALLOW_TRITON = dequant.triton_dequantize_functions and enabled
-        if enabled:
-            print(f"\nGGUF: Enabling Triton, supported quants: {tuple(dequant.triton_dequantize_functions)}")
-        return (passthrough_model.clone(),)
-
 
 NODE_CLASS_MAPPINGS = {
     "UnetLoaderGGUF": UnetLoaderGGUF,
@@ -349,5 +324,4 @@ NODE_CLASS_MAPPINGS = {
     "TripleCLIPLoaderGGUF": TripleCLIPLoaderGGUF,
     "QuadrupleCLIPLoaderGGUF": QuadrupleCLIPLoaderGGUF,
     "UnetLoaderGGUFAdvanced": UnetLoaderGGUFAdvanced,
-    "GGUFTritonToggle": GGUFTritonToggle,
 }
