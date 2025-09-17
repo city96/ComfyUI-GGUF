@@ -1,9 +1,13 @@
+from typing import Callable, NamedTuple
+
 import torch
 
 import triton
 import triton.language as tl
 
-from gguf import GGML_QUANT_SIZES, QK_K, GGMLQuantizationType
+from gguf import GGML_QUANT_SIZES, GGMLQuantizationType
+
+GQT = GGMLQuantizationType
 
 K_SCALE_SIZE = 12
 
@@ -23,6 +27,170 @@ _DEFAULT_AUTOTUNE_CONFIGS: list[triton.Config] = [
 ]
 
 _AUTOTUNE_CONFIGS: dict[str, list[triton.Config]] = {}
+
+
+class KernelDefinition(NamedTuple):
+    qtype: GGMLQuantizationType
+    kernel: triton.runtime.jit.JITFunction
+    block_size: int
+    type_size: int
+    kernel_kwargs: dict
+
+    @classmethod
+    def build(
+        cls,
+        qtype: GGMLQuantizationType,
+        kernel: triton.runtime.jit.JITFunction,
+        **kwargs,
+    ) -> NamedTuple:
+        block_size, type_size = GGML_QUANT_SIZES[qtype]
+        return cls(
+            qtype=qtype,
+            kernel=kernel,
+            block_size=block_size,
+            type_size=type_size,
+            kernel_kwargs=kwargs,
+        )
+
+    def __call__(
+        self,
+        blocks: torch.Tensor,
+        block_size: int,
+        type_size: int,
+        dtype=None,
+    ) -> torch.Tensor:
+        qtype, ggml_type_size = self.qtype, self.type_size
+        if blocks.dtype != torch.uint8:
+            raise ValueError(
+                f"GGUF Triton {qtype.name}: Blocks tensor dtype must be uint8 but got {blocks.dtype}"
+            )
+        if not blocks.is_cuda:
+            raise ValueError(f"GGUF Triton {qtype.name}: Blocks tensor must be CUDA")
+        if not blocks.is_contiguous():
+            raise ValueError(
+                f"GGUF Triton {qtype.name}: Blocks tensor must be contiguous"
+            )
+
+        n_elements = blocks.numel()
+        if n_elements % ggml_type_size != 0:
+            raise ValueError(
+                f"GGUF Triton {qtype.name}: Blocks tensor must have a number of elements ({n_elements}) divisible by the type size {ggml_type_size}"
+            )
+        n_total_blocks = n_elements // ggml_type_size
+
+        dtype = dtype or torch.float32
+        if (triton_dtype := TORCH_TO_TRITON_DTYPE_MAP.get(dtype)) is None:
+            raise TypeError(
+                f"GGUF Triton {qtype.name}: Unsupported output dtype {dtype}"
+            )
+
+        out_tensor = torch.empty(
+            n_total_blocks * self.block_size, dtype=dtype, device=blocks.device
+        )
+
+        def grid(meta: dict) -> tuple[int]:
+            return (triton.cdiv(n_total_blocks, meta["N_BLOCKS_PER_PROG"]),)
+
+        self.kernel[grid](
+            blocks,
+            out_tensor,
+            n_total_blocks,
+            BLOCK_SIZE=self.block_size,
+            TYPE_SIZE=ggml_type_size,
+            OUT_DTYPE=triton_dtype,
+            **self.kernel_kwargs,
+        )
+
+        return out_tensor
+
+
+@triton.autotune(
+    configs=_AUTOTUNE_CONFIGS.get("q3_k", _DEFAULT_AUTOTUNE_CONFIGS),
+    key=["n_total_blocks"],
+)
+@triton.jit
+def dequantize_Q3_K_kernel(
+    q_tensor_ptr,
+    out_tensor_ptr,
+    n_total_blocks,
+    OUT_DTYPE: tl.constexpr,
+    N_BLOCKS_PER_PROG: tl.constexpr,
+    TYPE_SIZE: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    out_dtype = OUT_DTYPE.value
+    pid = tl.program_id(axis=0)
+    start_block_idx = pid * N_BLOCKS_PER_PROG
+
+    # Vector of offsets for a 16-element chunk (one row of the output matrix)
+    offsets_16 = tl.arange(0, 16)
+
+    for i in tl.static_range(N_BLOCKS_PER_PROG):
+        current_block_idx = start_block_idx + i
+        if current_block_idx < n_total_blocks:
+            # --- Set up pointers for the current block ---
+            block_start_ptr = q_tensor_ptr + current_block_idx * TYPE_SIZE
+            output_start_ptr = out_tensor_ptr + current_block_idx * BLOCK_SIZE
+
+            hmask_ptr = block_start_ptr
+            qs_ptr = block_start_ptr + 32
+            scales_ptr = block_start_ptr + 96
+            d_ptr = block_start_ptr + 108
+
+            # --- Load the super-scale 'd' ---
+            d_super_scale = tl.load(d_ptr.to(tl.pointer_type(tl.float16))).to(out_dtype)
+
+            # --- Process block in 16 chunks of 16 values ---
+            for chunk_idx in tl.static_range(16):
+                # 1. Unpack the 6-bit scale for this chunk.
+                # Low 4 bits of the scale (lscale_nibble) - THIS WAS THE FINAL BUG
+                # Python logic: read all 8 low nibbles, then all 8 high nibbles.
+                lscale_byte_index = chunk_idx % 8
+                lscale_shift = (chunk_idx // 8) * 4
+                lscale_byte = tl.load(scales_ptr + lscale_byte_index)
+                lscale_nibble = (lscale_byte >> lscale_shift) & 0x0F
+
+                # High 2 bits of the scale (hscale_2bit) - This logic is correct.
+                hscale_byte_index = chunk_idx % 4
+                hscale_shift_index = chunk_idx // 4
+                hscale_byte = tl.load(scales_ptr + 8 + hscale_byte_index)
+                hscale_2bit = (hscale_byte >> (hscale_shift_index * 2)) & 0x03
+
+                scale_6bit = lscale_nibble | (hscale_2bit << 4)
+                final_scale = d_super_scale * (scale_6bit.to(tl.int8) - 32).to(
+                    out_dtype
+                )
+
+                # --- Map the 16 output elements to their source data ---
+                # This logic correctly models the Python reshape from a flat 256-element array.
+                flat_indices = chunk_idx * 16 + offsets_16
+
+                # 2. Unpack ql (lower 2 bits).
+                ql_source_row = flat_indices // 32
+                ql_source_col = flat_indices % 32
+
+                ql_segment = ql_source_row // 4
+                ql_shift_group = ql_source_row % 4
+
+                ql_ptr = qs_ptr + ql_segment * 32 + ql_source_col
+                ql_byte = tl.load(ql_ptr)
+                ql_vec = ((ql_byte >> (ql_shift_group * 2)) & 3).to(tl.int8)
+
+                # 3. Unpack qh (higher 1 bit, inverted).
+                qh_source_row = flat_indices // 32
+                qh_source_col = flat_indices % 32
+
+                qh_ptr = hmask_ptr + qh_source_col
+                qh_byte = tl.load(qh_ptr)
+                qh_vec = (((qh_byte >> qh_source_row) & 1) ^ 1).to(tl.int8)
+
+                # 4. Combine to get the final 3-bit quantized value.
+                q_vec = ql_vec - (qh_vec << 2)
+
+                # 5. Dequantize and store the 16 results.
+                dequant_16 = final_scale * q_vec.to(out_dtype)
+                output_ptr = output_start_ptr + chunk_idx * 16
+                tl.store(output_ptr + offsets_16, dequant_16)
 
 
 @triton.jit
@@ -64,8 +232,8 @@ def dequantize_Q4_K_kernel(
     OUT_DTYPE: tl.constexpr,
     N_BLOCKS_PER_PROG: tl.constexpr,
     TYPE_SIZE: tl.constexpr,
-    QK_K: tl.constexpr = QK_K,
-    K_SCALE_SIZE: tl.constexpr = K_SCALE_SIZE,
+    BLOCK_SIZE: tl.constexpr,
+    K_SCALE_SIZE: tl.constexpr,
 ):
     out_dtype = OUT_DTYPE.value
     pid = tl.program_id(axis=0)
@@ -78,7 +246,9 @@ def dequantize_Q4_K_kernel(
         current_block_idx = start_block_idx + i
         if current_block_idx < n_total_blocks:
             block_start_ptr = q_tensor_ptr + current_block_idx * TYPE_SIZE
-            output_start_ptr = out_tensor_ptr + current_block_idx * QK_K + offsets_32
+            output_start_ptr = (
+                out_tensor_ptr + current_block_idx * BLOCK_SIZE + offsets_32
+            )
 
             d = tl.load(block_start_ptr.to(tl.pointer_type(tl.float16))).to(out_dtype)
             dmin = tl.load((block_start_ptr + 2).to(tl.pointer_type(tl.float16))).to(
@@ -139,8 +309,8 @@ def dequantize_Q5_K_kernel(
     OUT_DTYPE: tl.constexpr,
     N_BLOCKS_PER_PROG: tl.constexpr,
     TYPE_SIZE: tl.constexpr,
-    QK_K: tl.constexpr = QK_K,
-    K_SCALE_SIZE: tl.constexpr = K_SCALE_SIZE,
+    BLOCK_SIZE: tl.constexpr,
+    K_SCALE_SIZE: tl.constexpr,
 ):
     out_dtype = OUT_DTYPE.value
     pid = tl.program_id(axis=0)
@@ -154,7 +324,9 @@ def dequantize_Q5_K_kernel(
         if current_block_idx < n_total_blocks:
             # Pointers and initial loads
             block_start_ptr = q_tensor_ptr + current_block_idx * TYPE_SIZE
-            output_start_ptr = out_tensor_ptr + current_block_idx * QK_K + offsets_32
+            output_start_ptr = (
+                out_tensor_ptr + current_block_idx * BLOCK_SIZE + offsets_32
+            )
             d = tl.load(block_start_ptr.to(tl.pointer_type(tl.float16))).to(out_dtype)
             dmin = tl.load((block_start_ptr + 2).to(tl.pointer_type(tl.float16))).to(
                 out_dtype
@@ -166,7 +338,7 @@ def dequantize_Q5_K_kernel(
             m_sc_word = tl.load(scales_ptr_u32 + 2)
 
             qh_start_ptr = block_start_ptr + offsets_scale
-            qs_start_ptr = qh_start_ptr + QK_K // 8
+            qs_start_ptr = qh_start_ptr + BLOCK_SIZE // 8
 
             qh_bytes_all = tl.load(qh_start_ptr)
 
@@ -209,7 +381,7 @@ def dequantize_Q6_K_kernel(
     OUT_DTYPE: tl.constexpr,
     N_BLOCKS_PER_PROG: tl.constexpr,
     TYPE_SIZE: tl.constexpr,
-    QK_K: tl.constexpr = QK_K,
+    BLOCK_SIZE: tl.constexpr,
 ):
     out_dtype = OUT_DTYPE.value
     pid = tl.program_id(axis=0)
@@ -221,7 +393,7 @@ def dequantize_Q6_K_kernel(
         current_block_idx = start_block_idx + i
         if current_block_idx < n_total_blocks:
             block_start_ptr = q_tensor_ptr + current_block_idx * TYPE_SIZE
-            output_start_ptr = out_tensor_ptr + current_block_idx * QK_K
+            output_start_ptr = out_tensor_ptr + current_block_idx * BLOCK_SIZE
 
             d_ptr = block_start_ptr + 208
             scales_ptr = block_start_ptr + 192
@@ -265,73 +437,15 @@ def dequantize_Q6_K_kernel(
                 tl.store(output_ptr + offsets_32, dequant_32)
 
 
-def dequantize_blocks_triton_wrapper_factory(
-    qtype: GGMLQuantizationType,
-    kernel,
-):
-    ggml_type_size = GGML_QUANT_SIZES[qtype][1]
-
-    def dequantize_blocks_triton(
-        blocks: torch.Tensor,
-        block_size: int,
-        type_size: int,
-        dtype=None,
-    ) -> torch.Tensor:
-        if blocks.dtype != torch.uint8:
-            raise ValueError(
-                f"GGUF Triton {qtype.name}: Blocks tensor dtype must be uint8 but got {blocks.dtype}"
-            )
-        if not blocks.is_cuda:
-            raise ValueError(f"GGUF Triton {qtype.name}: Blocks tensor must be CUDA")
-        if not blocks.is_contiguous():
-            raise ValueError(
-                f"GGUF Triton {qtype.name}: Blocks tensor must be contiguous"
-            )
-
-        n_elements = blocks.numel()
-        if n_elements % ggml_type_size != 0:
-            raise ValueError(
-                f"GGUF Triton {qtype.name}: Blocks tensor must have a number of elements ({n_elements}) divisible by the type size {ggml_type_size}"
-            )
-        n_total_blocks = n_elements // ggml_type_size
-
-        dtype = dtype or torch.float32
-        triton_dtype = TORCH_TO_TRITON_DTYPE_MAP.get(dtype)
-        if triton_dtype is None:
-            raise TypeError(
-                f"GGUF Triton {qtype.name}: Unsupported output dtype {dtype}"
-            )
-
-        out_tensor = torch.empty(
-            (n_total_blocks * QK_K,), dtype=dtype, device=blocks.device
-        )
-
-        def grid(meta: dict):
-            return (triton.cdiv(n_total_blocks, meta["N_BLOCKS_PER_PROG"]),)
-
-        kernel[grid](
-            blocks,
-            out_tensor,
-            n_total_blocks,
-            TYPE_SIZE=ggml_type_size,
-            OUT_DTYPE=triton_dtype,
-        )
-
-        return out_tensor.reshape(n_total_blocks, -1)
-
-    return dequantize_blocks_triton
-
-
 dequantize_functions = {
-    GGMLQuantizationType.Q4_K: dequantize_blocks_triton_wrapper_factory(
-        GGMLQuantizationType.Q4_K, dequantize_Q4_K_kernel
+    GQT.Q3_K: KernelDefinition.build(GQT.Q3_K, dequantize_Q3_K_kernel),
+    GQT.Q4_K: KernelDefinition.build(
+        GQT.Q4_K, dequantize_Q4_K_kernel, K_SCALE_SIZE=K_SCALE_SIZE
     ),
-    GGMLQuantizationType.Q5_K: dequantize_blocks_triton_wrapper_factory(
-        GGMLQuantizationType.Q5_K, dequantize_Q5_K_kernel
+    GQT.Q5_K: KernelDefinition.build(
+        GQT.Q5_K, dequantize_Q5_K_kernel, K_SCALE_SIZE=K_SCALE_SIZE
     ),
-    GGMLQuantizationType.Q6_K: dequantize_blocks_triton_wrapper_factory(
-        GGMLQuantizationType.Q6_K, dequantize_Q6_K_kernel
-    ),
+    GQT.Q6_K: KernelDefinition.build(GQT.Q6_K, dequantize_Q6_K_kernel),
 }
 
 __all__ = ("dequantize_functions",)
