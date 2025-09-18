@@ -1,10 +1,10 @@
-from typing import Callable, NamedTuple
+from __future__ import annotations
+
+from typing import Any, NamedTuple
 
 import torch
-
 import triton
 import triton.language as tl
-
 from gguf import GGML_QUANT_SIZES, GGMLQuantizationType
 
 GQT = GGMLQuantizationType
@@ -31,18 +31,18 @@ _AUTOTUNE_CONFIGS: dict[str, list[triton.Config]] = {}
 
 class KernelDefinition(NamedTuple):
     qtype: GGMLQuantizationType
-    kernel: triton.runtime.jit.JITFunction
+    kernel: triton.runtime.Autotuner
     block_size: int
     type_size: int
-    kernel_kwargs: dict
+    kernel_kwargs: dict[str, Any]
 
     @classmethod
     def build(
         cls,
         qtype: GGMLQuantizationType,
-        kernel: triton.runtime.jit.JITFunction,
-        **kwargs,
-    ) -> NamedTuple:
+        kernel: triton.runtime.Autotuner,
+        **kwargs: dict[str, Any],
+    ) -> "KernelDefinition":
         block_size, type_size = GGML_QUANT_SIZES[qtype]
         return cls(
             qtype=qtype,
@@ -57,7 +57,7 @@ class KernelDefinition(NamedTuple):
         blocks: torch.Tensor,
         block_size: int,
         type_size: int,
-        dtype=None,
+        dtype: torch.dtype | None = None,
     ) -> torch.Tensor:
         qtype, ggml_type_size = self.qtype, self.type_size
         if blocks.dtype != torch.uint8:
@@ -88,7 +88,7 @@ class KernelDefinition(NamedTuple):
             n_total_blocks * self.block_size, dtype=dtype, device=blocks.device
         )
 
-        def grid(meta: dict) -> tuple[int]:
+        def grid(meta: dict[str, Any]) -> tuple[int]:
             return (triton.cdiv(n_total_blocks, meta["N_BLOCKS_PER_PROG"]),)
 
         self.kernel[grid](
@@ -104,6 +104,84 @@ class KernelDefinition(NamedTuple):
         return out_tensor
 
 
+### K-quants
+
+
+@triton.autotune(
+    configs=_AUTOTUNE_CONFIGS.get("q2_k", _DEFAULT_AUTOTUNE_CONFIGS),
+    key=["n_total_blocks"],
+)
+@triton.jit
+def dequantize_Q2_K_kernel(
+    q_tensor_ptr,
+    out_tensor_ptr,
+    n_total_blocks,
+    OUT_DTYPE: tl.constexpr,
+    N_BLOCKS_PER_PROG: tl.constexpr,
+    TYPE_SIZE: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+) -> None:
+    out_dtype = OUT_DTYPE.value
+    pid = tl.program_id(axis=0)
+    start_block_idx = pid * N_BLOCKS_PER_PROG
+
+    # Vector of offsets for a 16-element chunk
+    offsets_16 = tl.arange(0, 16)
+
+    for i in tl.static_range(N_BLOCKS_PER_PROG):
+        current_block_idx = start_block_idx + i
+        if current_block_idx < n_total_blocks:
+            # --- Set up pointers for the current block ---
+            block_start_ptr = q_tensor_ptr + current_block_idx * TYPE_SIZE
+
+            # Data layout for Q2_K (TYPE_SIZE = 84 bytes)
+            scales_ptr = block_start_ptr
+            qs_ptr = block_start_ptr + 16
+            d_ptr = block_start_ptr + 80
+            dmin_ptr = block_start_ptr + 82
+
+            # --- Load the super-scales 'd' and 'dmin' ---
+            d = tl.load(d_ptr.to(tl.pointer_type(tl.float16))).to(out_dtype)
+            dmin = tl.load(dmin_ptr.to(tl.pointer_type(tl.float16))).to(out_dtype)
+
+            # --- Process block in 16 chunks of 16 values ---
+            for chunk_idx in tl.static_range(16):
+                # 1. Unpack the scales for this chunk.
+                # Each of the 16 scale bytes corresponds to a 16-element chunk.
+                # The low nibble scales 'd', the high nibble scales 'dmin'.
+                scale_byte = tl.load(scales_ptr + chunk_idx)
+
+                dl = d * (scale_byte & 0x0F).to(out_dtype)
+                ml = dmin * (scale_byte >> 4).to(out_dtype)
+
+                # --- Map the 16 output elements to their source data ---
+                # This logic correctly models the Python reshape from a flat 256-element array.
+                flat_indices = chunk_idx * 16 + offsets_16
+
+                # 2. Unpack the 2-bit quantized values (qs).
+                # The logical source array for qs is (2 segments * 4 shifts * 32 bytes).
+                source_row = flat_indices // 32
+                source_col = flat_indices % 32
+
+                segment = source_row // 4
+                shift_group = source_row % 4
+
+                # Gather bytes from their calculated source pointers
+                ptr = qs_ptr + segment * 32 + source_col
+                byte = tl.load(ptr)
+
+                # Apply the correct bit shift to extract the 2-bit value
+                q_vec = (byte >> (shift_group * 2)) & 3
+
+                # 3. Dequantize and store the 16 results.
+                dequant_16 = dl * q_vec.to(out_dtype) - ml
+
+                output_ptr = (
+                    out_tensor_ptr + current_block_idx * BLOCK_SIZE + chunk_idx * 16
+                )
+                tl.store(output_ptr + offsets_16, dequant_16)
+
+
 @triton.autotune(
     configs=_AUTOTUNE_CONFIGS.get("q3_k", _DEFAULT_AUTOTUNE_CONFIGS),
     key=["n_total_blocks"],
@@ -117,7 +195,7 @@ def dequantize_Q3_K_kernel(
     N_BLOCKS_PER_PROG: tl.constexpr,
     TYPE_SIZE: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
-):
+) -> None:
     out_dtype = OUT_DTYPE.value
     pid = tl.program_id(axis=0)
     start_block_idx = pid * N_BLOCKS_PER_PROG
@@ -143,14 +221,14 @@ def dequantize_Q3_K_kernel(
             # --- Process block in 16 chunks of 16 values ---
             for chunk_idx in tl.static_range(16):
                 # 1. Unpack the 6-bit scale for this chunk.
-                # Low 4 bits of the scale (lscale_nibble) - THIS WAS THE FINAL BUG
-                # Python logic: read all 8 low nibbles, then all 8 high nibbles.
+
+                # Low 4 bits of the scale (lscale_nibble)
                 lscale_byte_index = chunk_idx % 8
                 lscale_shift = (chunk_idx // 8) * 4
                 lscale_byte = tl.load(scales_ptr + lscale_byte_index)
                 lscale_nibble = (lscale_byte >> lscale_shift) & 0x0F
 
-                # High 2 bits of the scale (hscale_2bit) - This logic is correct.
+                # High 2 bits of the scale (hscale_2bit)
                 hscale_byte_index = chunk_idx % 4
                 hscale_shift_index = chunk_idx // 4
                 hscale_byte = tl.load(scales_ptr + 8 + hscale_byte_index)
@@ -162,7 +240,6 @@ def dequantize_Q3_K_kernel(
                 )
 
                 # --- Map the 16 output elements to their source data ---
-                # This logic correctly models the Python reshape from a flat 256-element array.
                 flat_indices = chunk_idx * 16 + offsets_16
 
                 # 2. Unpack ql (lower 2 bits).
@@ -193,8 +270,9 @@ def dequantize_Q3_K_kernel(
                 tl.store(output_ptr + offsets_16, dequant_16)
 
 
+# Helper function, shared by Q4_K and Q5_K.
 @triton.jit
-def dequantize_Q4_K_get_scales_min(
+def dequantize_Q4_K_Q5_K_get_scales_min(
     k_idx: int,
     d_sc_word: tl.tensor,
     m_word: tl.tensor,
@@ -216,10 +294,6 @@ def dequantize_Q4_K_get_scales_min(
     return tl.tuple((sc, m))
 
 
-# Same as Q4_K
-dequantize_Q5_K_get_scales_min = dequantize_Q4_K_get_scales_min
-
-
 @triton.autotune(
     configs=_AUTOTUNE_CONFIGS.get("q4_k", _DEFAULT_AUTOTUNE_CONFIGS),
     key=["n_total_blocks"],
@@ -234,7 +308,8 @@ def dequantize_Q4_K_kernel(
     TYPE_SIZE: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
     K_SCALE_SIZE: tl.constexpr,
-):
+    get_scales_min: tl.constexpr,
+) -> None:
     out_dtype = OUT_DTYPE.value
     pid = tl.program_id(axis=0)
     start_block_idx = pid * N_BLOCKS_PER_PROG
@@ -267,14 +342,10 @@ def dequantize_Q4_K_kernel(
                 k_idx = 2 * k_chunk
 
                 # --- Get scale A (for low nibbles) ---
-                sc_a, m_a = dequantize_Q4_K_get_scales_min(
-                    k_idx, d_sc_word, m_word, m_sc_word
-                )
+                sc_a, m_a = get_scales_min(k_idx, d_sc_word, m_word, m_sc_word)
 
                 # --- Get scale B (for high nibbles) ---
-                sc_b, m_b = dequantize_Q4_K_get_scales_min(
-                    k_idx + 1, d_sc_word, m_word, m_sc_word
-                )
+                sc_b, m_b = get_scales_min(k_idx + 1, d_sc_word, m_word, m_sc_word)
 
                 current_d_a = d * sc_a.to(out_dtype)
                 current_dm_a = dmin * m_a.to(out_dtype)
@@ -311,7 +382,8 @@ def dequantize_Q5_K_kernel(
     TYPE_SIZE: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
     K_SCALE_SIZE: tl.constexpr,
-):
+    get_scales_min: tl.constexpr,
+) -> None:
     out_dtype = OUT_DTYPE.value
     pid = tl.program_id(axis=0)
     start_block_idx = pid * N_BLOCKS_PER_PROG
@@ -345,9 +417,7 @@ def dequantize_Q5_K_kernel(
             # Process in 8 chunks of 32 values
             for chunk_idx in tl.static_range(8):
                 # # 1. Unpack scale and min for this chunk
-                sc, m = dequantize_Q5_K_get_scales_min(
-                    chunk_idx, d_sc_word, m_word, m_sc_word
-                )
+                sc, m = get_scales_min(chunk_idx, d_sc_word, m_word, m_sc_word)
 
                 final_d = d * sc.to(out_dtype)
                 final_dm = dmin * m.to(out_dtype)
@@ -382,7 +452,7 @@ def dequantize_Q6_K_kernel(
     N_BLOCKS_PER_PROG: tl.constexpr,
     TYPE_SIZE: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
-):
+) -> None:
     out_dtype = OUT_DTYPE.value
     pid = tl.program_id(axis=0)
     start_block_idx = pid * N_BLOCKS_PER_PROG
@@ -437,15 +507,278 @@ def dequantize_Q6_K_kernel(
                 tl.store(output_ptr + offsets_32, dequant_32)
 
 
-dequantize_functions = {
-    GQT.Q3_K: KernelDefinition.build(GQT.Q3_K, dequantize_Q3_K_kernel),
+### Legacy quants
+
+
+@triton.autotune(
+    configs=_AUTOTUNE_CONFIGS.get("q4_0", _DEFAULT_AUTOTUNE_CONFIGS),
+    key=["n_total_blocks"],
+)
+@triton.jit
+def dequantize_Q4_0_kernel(
+    q_tensor_ptr,
+    out_tensor_ptr,
+    n_total_blocks,
+    OUT_DTYPE: tl.constexpr,
+    N_BLOCKS_PER_PROG: tl.constexpr,
+    TYPE_SIZE: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+) -> None:
+    out_dtype = OUT_DTYPE.value
+    pid = tl.program_id(axis=0)
+    start_block_idx = pid * N_BLOCKS_PER_PROG
+
+    # Vector of offsets for the 16 bytes of quantized data
+    offsets_16 = tl.arange(0, 16)
+
+    for i in tl.static_range(N_BLOCKS_PER_PROG):
+        current_block_idx = start_block_idx + i
+        if current_block_idx < n_total_blocks:
+            # --- Set up pointers for the current block ---
+            block_start_ptr = q_tensor_ptr + current_block_idx * TYPE_SIZE
+            output_start_ptr = out_tensor_ptr + current_block_idx * BLOCK_SIZE
+
+            # 1. Load the float16 scale 'd'. It's the first 2 bytes of the block.
+            d = tl.load(block_start_ptr.to(tl.pointer_type(tl.float16))).to(out_dtype)
+
+            # 2. Load the 16 bytes of quantized data ('qs').
+            qs_ptr = block_start_ptr + 2
+            qs_bytes_16 = tl.load(qs_ptr + offsets_16)
+
+            # 3. Unpack the 16 bytes into 32 4-bit values (nibbles).
+            # The low nibbles form the first 16 values of the block.
+            qs_low = (qs_bytes_16 & 0x0F).to(tl.int8)
+            # The high nibbles form the second 16 values of the block.
+            qs_high = (qs_bytes_16 >> 4).to(tl.int8)
+
+            # 4. Dequantize the values from unsigned 0-15 to signed -8 to 7.
+            q_low = qs_low - 8
+            q_high = qs_high - 8
+
+            # 5. Apply the scale and store the 32 dequantized results.
+            dequant_low = d * q_low.to(out_dtype)
+            dequant_high = d * q_high.to(out_dtype)
+
+            tl.store(output_start_ptr + offsets_16, dequant_low)
+            tl.store(output_start_ptr + 16 + offsets_16, dequant_high)
+
+
+@triton.autotune(
+    configs=_AUTOTUNE_CONFIGS.get("q4_1", _DEFAULT_AUTOTUNE_CONFIGS),
+    key=["n_total_blocks"],
+)
+@triton.jit
+def dequantize_Q4_1_kernel(
+    q_tensor_ptr,
+    out_tensor_ptr,
+    n_total_blocks,
+    OUT_DTYPE: tl.constexpr,
+    N_BLOCKS_PER_PROG: tl.constexpr,
+    TYPE_SIZE: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+) -> None:
+    out_dtype = OUT_DTYPE.value
+    pid = tl.program_id(axis=0)
+    start_block_idx = pid * N_BLOCKS_PER_PROG
+
+    # Vector of offsets for the 16 bytes of quantized data
+    offsets_16 = tl.arange(0, 16)
+
+    for i in tl.static_range(N_BLOCKS_PER_PROG):
+        current_block_idx = start_block_idx + i
+        if current_block_idx < n_total_blocks:
+            # --- Set up pointers for the current block ---
+            block_start_ptr = q_tensor_ptr + current_block_idx * TYPE_SIZE
+            output_start_ptr = out_tensor_ptr + current_block_idx * BLOCK_SIZE
+
+            # 1. Load scale 'd' (first 2 bytes) and min 'm' (next 2 bytes).
+            d_ptr = block_start_ptr
+            m_ptr = block_start_ptr + 2
+
+            d = tl.load(d_ptr.to(tl.pointer_type(tl.float16))).to(out_dtype)
+            m = tl.load(m_ptr.to(tl.pointer_type(tl.float16))).to(out_dtype)
+
+            # 2. Load the 16 bytes of quantized data ('qs').
+            qs_ptr = block_start_ptr + 4
+            qs_bytes_16 = tl.load(qs_ptr + offsets_16)
+
+            # 3. Unpack the 16 bytes into 32 4-bit values (0-15).
+            qs_low = (qs_bytes_16 & 0x0F).to(out_dtype)
+            qs_high = (qs_bytes_16 >> 4).to(out_dtype)
+
+            # 4. Dequantize: (d * qs) + m
+            dequant_low = d * qs_low + m
+            dequant_high = d * qs_high + m
+
+            # 5. Store the 32 dequantized results.
+            tl.store(output_start_ptr + offsets_16, dequant_low)
+            tl.store(output_start_ptr + 16 + offsets_16, dequant_high)
+
+
+@triton.autotune(
+    configs=_AUTOTUNE_CONFIGS.get("q5_0", _DEFAULT_AUTOTUNE_CONFIGS),
+    key=["n_total_blocks"],
+)
+@triton.jit
+def dequantize_Q5_0_kernel(
+    q_tensor_ptr,
+    out_tensor_ptr,
+    n_total_blocks,
+    OUT_DTYPE: tl.constexpr,
+    N_BLOCKS_PER_PROG: tl.constexpr,
+    TYPE_SIZE: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+) -> None:
+    out_dtype = OUT_DTYPE.value
+    pid = tl.program_id(axis=0)
+    start_block_idx = pid * N_BLOCKS_PER_PROG
+
+    # Vector of offsets for 16-element vectors
+    offsets_16 = tl.arange(0, 16)
+
+    for i in tl.static_range(N_BLOCKS_PER_PROG):
+        current_block_idx = start_block_idx + i
+        if current_block_idx < n_total_blocks:
+            # --- Set up pointers for the current block ---
+            block_start_ptr = q_tensor_ptr + current_block_idx * TYPE_SIZE
+            output_start_ptr = out_tensor_ptr + current_block_idx * BLOCK_SIZE
+
+            # Data layout: 2 bytes 'd', 4 bytes 'qh', 16 bytes 'qs'
+            d_ptr = block_start_ptr
+            qh_ptr = block_start_ptr + 2
+            qs_ptr = block_start_ptr + 6
+
+            # 1. Load the scale 'd' and the high-bit mask 'qh'.
+            d = tl.load(d_ptr.to(tl.pointer_type(tl.float16))).to(out_dtype)
+
+            # Perform an unaligned load for the 4 bytes of qh.
+            b0 = tl.load(qh_ptr + 0).to(tl.uint32)
+            b1 = tl.load(qh_ptr + 1).to(tl.uint32) << 8
+            b2 = tl.load(qh_ptr + 2).to(tl.uint32) << 16
+            b3 = tl.load(qh_ptr + 3).to(tl.uint32) << 24
+            qh_word = b0 | b1 | b2 | b3
+
+            # 2. Load the 16 bytes of low-bits 'qs'.
+            qs_bytes_16 = tl.load(qs_ptr + offsets_16)
+
+            # --- Process the first 16 values ---
+            ql_low = (qs_bytes_16 & 0x0F).to(tl.uint8)
+            qh_low = ((qh_word >> offsets_16) & 1).to(tl.uint8)
+            q_low = (ql_low | (qh_low << 4)).to(tl.int8) - 16
+            dequant_low = d * q_low.to(out_dtype)
+
+            # --- Process the second 16 values ---
+            ql_high = (qs_bytes_16 >> 4).to(tl.uint8)
+            qh_high = ((qh_word >> (offsets_16 + 16)) & 1).to(tl.uint8)
+            q_high = (ql_high | (qh_high << 4)).to(tl.int8) - 16
+            dequant_high = d * q_high.to(out_dtype)
+
+            # 4. Store the 32 dequantized results.
+            tl.store(output_start_ptr + offsets_16, dequant_low)
+            tl.store(output_start_ptr + 16 + offsets_16, dequant_high)
+
+
+@triton.autotune(
+    configs=_AUTOTUNE_CONFIGS.get("q5_1", _DEFAULT_AUTOTUNE_CONFIGS),
+    key=["n_total_blocks"],
+)
+@triton.jit
+def dequantize_Q5_1_kernel(
+    q_tensor_ptr,
+    out_tensor_ptr,
+    n_total_blocks,
+    OUT_DTYPE: tl.constexpr,
+    N_BLOCKS_PER_PROG: tl.constexpr,
+    TYPE_SIZE: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+) -> None:
+    out_dtype = OUT_DTYPE.value
+    pid = tl.program_id(axis=0)
+    start_block_idx = pid * N_BLOCKS_PER_PROG
+
+    # Vector of offsets for 16-element vectors
+    offsets_16 = tl.arange(0, 16)
+
+    for i in tl.static_range(N_BLOCKS_PER_PROG):
+        current_block_idx = start_block_idx + i
+        if current_block_idx < n_total_blocks:
+            # --- Set up pointers for the current block ---
+            block_start_ptr = q_tensor_ptr + current_block_idx * TYPE_SIZE
+            output_start_ptr = out_tensor_ptr + current_block_idx * BLOCK_SIZE
+
+            # Data layout: 2 bytes 'd', 2 bytes 'm', 4 bytes 'qh', 16 bytes 'qs'
+            d_ptr = block_start_ptr
+            m_ptr = block_start_ptr + 2
+            qh_ptr = block_start_ptr + 4
+            qs_ptr = block_start_ptr + 8
+
+            # 1. Load the scales 'd', 'm' and the high-bit mask 'qh'.
+            d = tl.load(d_ptr.to(tl.pointer_type(tl.float16))).to(out_dtype)
+            m = tl.load(m_ptr.to(tl.pointer_type(tl.float16))).to(out_dtype)
+            # This is a safe aligned load because TYPE_SIZE (24) and qh offset (4) are multiples of 4.
+            qh_word = tl.load(qh_ptr.to(tl.pointer_type(tl.uint32)))
+
+            # 2. Load the 16 bytes of low-bits 'qs'.
+            qs_bytes_16 = tl.load(qs_ptr + offsets_16)
+
+            # --- Process the first 16 values ---
+            ql_low = (qs_bytes_16 & 0x0F).to(tl.uint8)
+            qh_low = ((qh_word >> offsets_16) & 1).to(tl.uint8)
+            q_low = (ql_low | (qh_low << 4)).to(out_dtype)
+            dequant_low = d * q_low + m
+
+            # --- Process the second 16 values ---
+            ql_high = (qs_bytes_16 >> 4).to(tl.uint8)
+            qh_high = ((qh_word >> (offsets_16 + 16)) & 1).to(tl.uint8)
+            q_high = (ql_high | (qh_high << 4)).to(out_dtype)
+            dequant_high = d * q_high + m
+
+            # 4. Store the 32 dequantized results.
+            tl.store(output_start_ptr + offsets_16, dequant_low)
+            tl.store(output_start_ptr + 16 + offsets_16, dequant_high)
+
+
+dequantize_functions: dict[GGMLQuantizationType, KernelDefinition] = {
+    GQT.Q4_0: KernelDefinition.build(
+        qtype=GQT.Q4_0,
+        kernel=dequantize_Q4_0_kernel,
+    ),
+    GQT.Q4_1: KernelDefinition.build(
+        qtype=GQT.Q4_1,
+        kernel=dequantize_Q4_1_kernel,
+    ),
+    GQT.Q5_0: KernelDefinition.build(
+        qtype=GQT.Q5_0,
+        kernel=dequantize_Q5_0_kernel,
+    ),
+    GQT.Q5_1: KernelDefinition.build(
+        qtype=GQT.Q5_1,
+        kernel=dequantize_Q5_1_kernel,
+    ),
+    GQT.Q2_K: KernelDefinition.build(
+        qtype=GQT.Q2_K,
+        kernel=dequantize_Q2_K_kernel,
+    ),
+    GQT.Q3_K: KernelDefinition.build(
+        qtype=GQT.Q3_K,
+        kernel=dequantize_Q3_K_kernel,
+    ),
     GQT.Q4_K: KernelDefinition.build(
-        GQT.Q4_K, dequantize_Q4_K_kernel, K_SCALE_SIZE=K_SCALE_SIZE
+        qtype=GQT.Q4_K,
+        kernel=dequantize_Q4_K_kernel,
+        K_SCALE_SIZE=K_SCALE_SIZE,
+        get_scales_min=dequantize_Q4_K_Q5_K_get_scales_min,
     ),
     GQT.Q5_K: KernelDefinition.build(
-        GQT.Q5_K, dequantize_Q5_K_kernel, K_SCALE_SIZE=K_SCALE_SIZE
+        qtype=GQT.Q5_K,
+        kernel=dequantize_Q5_K_kernel,
+        K_SCALE_SIZE=K_SCALE_SIZE,
+        get_scales_min=dequantize_Q4_K_Q5_K_get_scales_min,
     ),
-    GQT.Q6_K: KernelDefinition.build(GQT.Q6_K, dequantize_Q6_K_kernel),
+    GQT.Q6_K: KernelDefinition.build(
+        qtype=GQT.Q6_K,
+        kernel=dequantize_Q6_K_kernel,
+    ),
 }
 
 __all__ = ("dequantize_functions",)
