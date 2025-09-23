@@ -5,17 +5,18 @@ import gguf
 import torch
 from tqdm import tqdm
 
-HAVE_TRITON=False
+HAVE_BFLOAT16=hasattr(torch, "bfloat16")
 try:
     from . import dequant_triton
     triton_dequantize_functions=dequant_triton.dequantize_functions
     HAVE_TRITON=True
 except Exception as exc:
+    HAVE_TRITON=False
     print(f"\nGGUF: Failed to enable Triton: {exc}")
     triton_dequantize_functions={}
 
 
-TORCH_COMPATIBLE_QTYPES = (None, gguf.GGMLQuantizationType.F32, gguf.GGMLQuantizationType.F16)
+TORCH_COMPATIBLE_QTYPES = frozenset((None, gguf.GGMLQuantizationType.F32, gguf.GGMLQuantizationType.F16))
 
 DequantizeHandlersType = dict[gguf.GGMLQuantizationType, Callable]
 DequantizeDtype = Optional[Union[torch.dtype, Literal["target"]]]
@@ -43,6 +44,8 @@ def dequantize_tensor(tensor, dtype=None, config: Optional[GGUFConfig]=None):
 
     if qtype in TORCH_COMPATIBLE_QTYPES:
         return tensor.to(dtype)
+    if qtype == gguf.GGMLQuantizationType.BF16 and HAVE_BFLOAT16:
+        return tensor.view(dtype=torch.bfloat16).reshape(oshape).to(dtype)
     if qtype in dequantize_functions:
         dequant_dtype = dtype if config.dequant_dtype == "target" else config.dequant_dtype
         dequantize_function = config.dequantize_function or dequantize
