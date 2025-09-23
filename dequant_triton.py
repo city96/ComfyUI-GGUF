@@ -16,7 +16,11 @@ TORCH_TO_TRITON_DTYPE_MAP: dict[torch.dtype, tl.dtype] = {
     torch.float32: tl.float32,
     torch.float16: tl.float16,
     torch.bfloat16: tl.bfloat16,
-}
+} | (
+    {torch.float8_e4m3fn: tl.float8e4nv}
+    if hasattr(torch, "float8_e4m3fn") and hasattr(tl, "float8e4nv")
+    else {}
+)
 
 _DEFAULT_AUTOTUNE_CONFIGS: list[triton.Config] = [
     triton.Config({"N_BLOCKS_PER_PROG": 1}, num_warps=4),
@@ -44,7 +48,7 @@ class KernelImpl:
         q_tensor_ptr,
         out_tensor_ptr,
         n_total_blocks,
-        OUT_DTYPE: tl.constexpr,
+        DTYPE: tl.constexpr,
         N_BLOCKS_PER_PROG: tl.constexpr,
         CTX: tl.constexpr,
     ) -> None:
@@ -69,7 +73,7 @@ class KernelImpl:
                         current_q_ptr,
                         current_out_ptr,
                         CTX=CTX,
-                        OUT_DTYPE=OUT_DTYPE,
+                        DTYPE=DTYPE,
                     )
 
 
@@ -111,6 +115,7 @@ class KernelDefinition(NamedTuple):
         block_size: int,
         type_size: int,
         dtype: torch.dtype | None = None,
+        _math_dtype: tl.dtype | None = tl.float32,
     ) -> torch.Tensor:
         qtype, ggml_type_size = self.qtype, self.type_size
         if blocks.dtype != torch.uint8:
@@ -135,7 +140,9 @@ class KernelDefinition(NamedTuple):
         n_total_blocks = n_elements // ggml_type_size
 
         dtype = dtype or torch.float32
-        if (triton_dtype := TORCH_TO_TRITON_DTYPE_MAP.get(dtype)) is None:
+        if _math_dtype is not None:
+            triton_dtype = _math_dtype
+        elif (triton_dtype := TORCH_TO_TRITON_DTYPE_MAP.get(dtype)) is None:
             raise TypeError(
                 f"GGUF Triton {qtype.name}: Unsupported output dtype {dtype}"
             )
@@ -152,7 +159,7 @@ class KernelDefinition(NamedTuple):
             out_tensor,
             n_total_blocks,
             CTX=self.kernel,
-            OUT_DTYPE=triton_dtype,
+            DTYPE=triton_dtype,
         )
 
         return out_tensor
@@ -176,7 +183,7 @@ class KernelImpl_Q2_K(KernelImpl_K_Quant):
         block_start_ptr,
         out_tensor_ptr,
         CTX: tl.constexpr,
-        OUT_DTYPE: tl.constexpr,
+        DTYPE: tl.constexpr,
     ) -> None:
         # Vector of offsets for a 16-element chunk
         offsets_16 = tl.arange(0, 16)
@@ -188,8 +195,8 @@ class KernelImpl_Q2_K(KernelImpl_K_Quant):
         dmin_ptr = block_start_ptr + 82
 
         # --- Load the super-scales 'd' and 'dmin' ---
-        d = tl.load(d_ptr.to(tl.pointer_type(tl.float16))).to(OUT_DTYPE)
-        dmin = tl.load(dmin_ptr.to(tl.pointer_type(tl.float16))).to(OUT_DTYPE)
+        d = tl.load(d_ptr.to(tl.pointer_type(tl.float16))).to(DTYPE)
+        dmin = tl.load(dmin_ptr.to(tl.pointer_type(tl.float16))).to(DTYPE)
 
         # --- Process block in 16 chunks of 16 values ---
         for chunk_idx in tl.static_range(16):
@@ -198,8 +205,8 @@ class KernelImpl_Q2_K(KernelImpl_K_Quant):
             # The low nibble scales 'd', the high nibble scales 'dmin'.
             scale_byte = tl.load(scales_ptr + chunk_idx)
 
-            dl = d * (scale_byte & 0x0F).to(OUT_DTYPE)
-            ml = dmin * (scale_byte >> 4).to(OUT_DTYPE)
+            dl = d * (scale_byte & 0x0F).to(DTYPE)
+            ml = dmin * (scale_byte >> 4).to(DTYPE)
 
             # --- Map the 16 output elements to their source data ---
             # This logic correctly models the Python reshape from a flat 256-element array.
@@ -221,7 +228,7 @@ class KernelImpl_Q2_K(KernelImpl_K_Quant):
             q_vec = (byte >> (shift_group * 2)) & 3
 
             # 3. Dequantize and store the 16 results.
-            dequant_16 = dl * q_vec.to(OUT_DTYPE) - ml
+            dequant_16 = dl * q_vec.to(DTYPE) - ml
 
             output_ptr = out_tensor_ptr + chunk_idx * 16
             tl.store(output_ptr + offsets_16, dequant_16)
@@ -235,7 +242,7 @@ class KernelImpl_Q3_K(KernelImpl_K_Quant):
         block_start_ptr,
         out_tensor_ptr,
         CTX: tl.constexpr,
-        OUT_DTYPE: tl.constexpr,
+        DTYPE: tl.constexpr,
     ) -> None:
         # Vector of offsets for a 16-element chunk (one row of the output matrix)
         offsets_16 = tl.arange(0, 16)
@@ -246,7 +253,7 @@ class KernelImpl_Q3_K(KernelImpl_K_Quant):
         d_ptr = block_start_ptr + 108
 
         # --- Load the super-scale 'd' ---
-        d_super_scale = tl.load(d_ptr.to(tl.pointer_type(tl.float16))).to(OUT_DTYPE)
+        d_super_scale = tl.load(d_ptr.to(tl.pointer_type(tl.float16))).to(DTYPE)
 
         # --- Process block in 16 chunks of 16 values ---
         for chunk_idx in tl.static_range(16):
@@ -267,7 +274,7 @@ class KernelImpl_Q3_K(KernelImpl_K_Quant):
             scale_6bit = lscale_nibble | (hscale_2bit << 4)
             final_scale = d_super_scale * (
                 scale_6bit.to(tl.int8, bitcast=True) - 32
-            ).to(OUT_DTYPE)
+            ).to(DTYPE)
 
             # --- Map the 16 output elements to their source data ---
             flat_indices = chunk_idx * 16 + offsets_16
@@ -295,7 +302,7 @@ class KernelImpl_Q3_K(KernelImpl_K_Quant):
             q_vec = ql_vec - (qh_vec << 2)
 
             # 5. Dequantize and store the 16 results.
-            dequant_16 = final_scale * q_vec.to(OUT_DTYPE)
+            dequant_16 = final_scale * q_vec.to(DTYPE)
             output_ptr = out_tensor_ptr + chunk_idx * 16 + offsets_16
             tl.store(output_ptr, dequant_16)
 
@@ -332,15 +339,13 @@ class KernelImpl_Q4_K(KernelImpl_K_Quant):
         block_start_ptr,
         out_tensor_ptr,
         CTX: tl.constexpr,
-        OUT_DTYPE: tl.constexpr,
+        DTYPE: tl.constexpr,
     ) -> None:
         offsets_32 = tl.arange(0, 32)
         offsets_scale = offsets_32 + 4 + CTX.k_scale_size
 
-        d = tl.load(block_start_ptr.to(tl.pointer_type(tl.float16))).to(OUT_DTYPE)
-        dmin = tl.load((block_start_ptr + 2).to(tl.pointer_type(tl.float16))).to(
-            OUT_DTYPE
-        )
+        d = tl.load(block_start_ptr.to(tl.pointer_type(tl.float16))).to(DTYPE)
+        dmin = tl.load((block_start_ptr + 2).to(tl.pointer_type(tl.float16))).to(DTYPE)
 
         scales_ptr_u32 = (block_start_ptr + 4).to(tl.pointer_type(tl.uint32))
         d_sc_word = tl.load(scales_ptr_u32 + 0)
@@ -359,17 +364,17 @@ class KernelImpl_Q4_K(KernelImpl_K_Quant):
             # --- Get scale B (for high nibbles) ---
             sc_b, m_b = CTX.get_scales_min(k_idx + 1, d_sc_word, m_word, m_sc_word)
 
-            current_d_a = d * sc_a.to(OUT_DTYPE)
-            current_dm_a = dmin * m_a.to(OUT_DTYPE)
-            current_d_b = d * sc_b.to(OUT_DTYPE)
-            current_dm_b = dmin * m_b.to(OUT_DTYPE)
+            current_d_a = d * sc_a.to(DTYPE)
+            current_dm_a = dmin * m_a.to(DTYPE)
+            current_d_b = d * sc_b.to(DTYPE)
+            current_dm_b = dmin * m_b.to(DTYPE)
 
             # Load 32 bytes of quantized data
             chunk_qs_ptr = qs_start_ptr + k_chunk * 32
             qs_bytes_chunk = tl.load(chunk_qs_ptr)
 
-            qs_low = (qs_bytes_chunk & 0x0F).to(OUT_DTYPE)
-            qs_high = (qs_bytes_chunk >> 4).to(OUT_DTYPE)
+            qs_low = (qs_bytes_chunk & 0x0F).to(DTYPE)
+            qs_high = (qs_bytes_chunk >> 4).to(DTYPE)
 
             dequant_low = current_d_a * qs_low - current_dm_a
             dequant_high = current_d_b * qs_high - current_dm_b
@@ -388,16 +393,14 @@ class KernelImpl_Q5_K(KernelImpl_Q4_K):
         block_start_ptr,
         out_tensor_ptr,
         CTX: tl.constexpr,
-        OUT_DTYPE: tl.constexpr,
+        DTYPE: tl.constexpr,
     ) -> None:
         offsets_32 = tl.arange(0, 32)
         offsets_scale = offsets_32 + 4 + CTX.k_scale_size
 
         # Pointers and initial loads
-        d = tl.load(block_start_ptr.to(tl.pointer_type(tl.float16))).to(OUT_DTYPE)
-        dmin = tl.load((block_start_ptr + 2).to(tl.pointer_type(tl.float16))).to(
-            OUT_DTYPE
-        )
+        d = tl.load(block_start_ptr.to(tl.pointer_type(tl.float16))).to(DTYPE)
+        dmin = tl.load((block_start_ptr + 2).to(tl.pointer_type(tl.float16))).to(DTYPE)
 
         scales_ptr_u32 = (block_start_ptr + 4).to(tl.pointer_type(tl.uint32))
         d_sc_word = tl.load(scales_ptr_u32 + 0)
@@ -414,8 +417,8 @@ class KernelImpl_Q5_K(KernelImpl_Q4_K):
             # # 1. Unpack scale and min for this chunk
             sc, m = CTX.get_scales_min(chunk_idx, d_sc_word, m_word, m_sc_word)
 
-            final_d = d * sc.to(OUT_DTYPE)
-            final_dm = dmin * m.to(OUT_DTYPE)
+            final_d = d * sc.to(DTYPE)
+            final_dm = dmin * m.to(DTYPE)
 
             # 2. Unpack ql (lower 4 bits) for this chunk
             qs_byte_offset = (chunk_idx // 2) * 32
@@ -428,7 +431,7 @@ class KernelImpl_Q5_K(KernelImpl_Q4_K):
 
             # 4. Combine, dequantize, and store
             q = ql | (qh << 4)
-            dequant_32 = final_d * q.to(OUT_DTYPE) - final_dm
+            dequant_32 = final_d * q.to(DTYPE) - final_dm
 
             output_ptr = out_tensor_ptr + chunk_idx * 32 + offsets_32
             output_ptr.store(dequant_32)
@@ -442,14 +445,14 @@ class KernelImpl_Q6_K(KernelImpl_K_Quant):
         block_start_ptr,
         out_tensor_ptr,
         CTX: tl.constexpr,
-        OUT_DTYPE: tl.constexpr,
+        DTYPE: tl.constexpr,
     ) -> None:
         offsets_32 = tl.arange(0, 32)
         mask_16 = offsets_32 < 16
 
         d_ptr = block_start_ptr + 208
         scales_ptr = block_start_ptr + 192
-        d_super_scale = tl.load(d_ptr.to(tl.pointer_type(tl.float16))).to(OUT_DTYPE)
+        d_super_scale = tl.load(d_ptr.to(tl.pointer_type(tl.float16))).to(DTYPE)
 
         # Process block in 8 chunks of 32 values
         for chunk_idx in tl.static_range(8):
@@ -471,7 +474,7 @@ class KernelImpl_Q6_K(KernelImpl_K_Quant):
             qh_vec_32 = (qh_32_bytes.to(tl.int8, bitcast=True) >> bit_shift) & 0x03
 
             # 3. Combine and dequantize
-            q_vec_32 = ((ql_vec_32 | (qh_vec_32 << 4)) - 32).to(OUT_DTYPE)
+            q_vec_32 = ((ql_vec_32 | (qh_vec_32 << 4)) - 32).to(DTYPE)
 
             # 4. Load and apply correct scales
             scale_0_ptr = scales_ptr + chunk_idx * 2
@@ -482,7 +485,7 @@ class KernelImpl_Q6_K(KernelImpl_K_Quant):
                     tl.load(scale_0_ptr + 1),
                 )
                 .to(tl.int8, bitcast=True)
-                .to(OUT_DTYPE)
+                .to(DTYPE)
             )
             scales_32 = d_super_scale * scales_0_1
             dequant_32 = q_vec_32 * scales_32
@@ -518,13 +521,13 @@ class KernelImpl_Q4_0(KernelImpl_Legacy):
         block_start_ptr,
         out_tensor_ptr,
         CTX: tl.constexpr,
-        OUT_DTYPE: tl.constexpr,
+        DTYPE: tl.constexpr,
     ) -> None:
         # Vector of offsets for the 16 bytes of quantized data
         offsets_16 = tl.arange(0, 16)
 
         # 1. Load the float16 scale 'd'. It's the first 2 bytes of the block.
-        d = tl.load(block_start_ptr.to(tl.pointer_type(tl.float16))).to(OUT_DTYPE)
+        d = tl.load(block_start_ptr.to(tl.pointer_type(tl.float16))).to(DTYPE)
 
         # 2. Load the 16 bytes of quantized data ('qs').
         qs_ptr = block_start_ptr + 2
@@ -541,8 +544,8 @@ class KernelImpl_Q4_0(KernelImpl_Legacy):
         q_high = qs_high - 8
 
         # 5. Apply the scale and store the 32 dequantized results.
-        dequant_low = d * q_low.to(OUT_DTYPE)
-        dequant_high = d * q_high.to(OUT_DTYPE)
+        dequant_low = d * q_low.to(DTYPE)
+        dequant_high = d * q_high.to(DTYPE)
 
         CTX.store_output(out_tensor_ptr, dequant_low, dequant_high)
 
@@ -555,7 +558,7 @@ class KernelImpl_Q4_1(KernelImpl_Legacy):
         block_start_ptr,
         out_tensor_ptr,
         CTX: tl.constexpr,
-        OUT_DTYPE: tl.constexpr,
+        DTYPE: tl.constexpr,
     ) -> None:
         # Vector of offsets for the 16 bytes of quantized data
         offsets_16 = tl.arange(0, 16)
@@ -564,16 +567,16 @@ class KernelImpl_Q4_1(KernelImpl_Legacy):
         d_ptr = block_start_ptr
         m_ptr = block_start_ptr + 2
 
-        d = tl.load(d_ptr.to(tl.pointer_type(tl.float16))).to(OUT_DTYPE)
-        m = tl.load(m_ptr.to(tl.pointer_type(tl.float16))).to(OUT_DTYPE)
+        d = tl.load(d_ptr.to(tl.pointer_type(tl.float16))).to(DTYPE)
+        m = tl.load(m_ptr.to(tl.pointer_type(tl.float16))).to(DTYPE)
 
         # 2. Load the 16 bytes of quantized data ('qs').
         qs_ptr = block_start_ptr + 4
         qs_bytes_16 = tl.load(qs_ptr + offsets_16)
 
         # 3. Unpack the 16 bytes into 32 4-bit values (0-15).
-        qs_low = (qs_bytes_16 & 0x0F).to(OUT_DTYPE)
-        qs_high = (qs_bytes_16 >> 4).to(OUT_DTYPE)
+        qs_low = (qs_bytes_16 & 0x0F).to(DTYPE)
+        qs_high = (qs_bytes_16 >> 4).to(DTYPE)
 
         # 4. Dequantize: (d * qs) + m
         dequant_low = d * qs_low + m
@@ -590,7 +593,7 @@ class KernelImpl_Q5_0(KernelImpl_Legacy):
         block_start_ptr,
         out_tensor_ptr,
         CTX: tl.constexpr,
-        OUT_DTYPE: tl.constexpr,
+        DTYPE: tl.constexpr,
     ) -> None:
         offsets_16 = tl.arange(0, 16)
         offsets_4 = tl.arange(0, 4)
@@ -599,19 +602,19 @@ class KernelImpl_Q5_0(KernelImpl_Legacy):
         qh_ptr = block_start_ptr + 2
         qs_ptr = block_start_ptr + 6
 
-        d = tl.load(d_ptr.to(tl.pointer_type(tl.float16))).to(OUT_DTYPE)
+        d = tl.load(d_ptr.to(tl.pointer_type(tl.float16))).to(DTYPE)
         qh_word = (tl.load(qh_ptr + offsets_4).to(tl.uint32) << (offsets_4 << 3)).sum()
         qs_bytes_16 = tl.load(qs_ptr + offsets_16)
 
         ql_low = qs_bytes_16 & 0x0F
         qh_low = (qh_word >> offsets_16) & 1
         q_low = (ql_low | (qh_low << 4)).to(tl.int8, bitcast=True) - 16
-        dequant_low = d * q_low.to(OUT_DTYPE)  # Shape: [16]
+        dequant_low = d * q_low.to(DTYPE)  # Shape: [16]
 
         ql_high = qs_bytes_16 >> 4
         qh_high = (qh_word >> (offsets_16 + 16)) & 1
         q_high = (ql_high | (qh_high << 4)).to(tl.int8, bitcast=True) - 16
-        dequant_high = d * q_high.to(OUT_DTYPE)  # Shape: [16]
+        dequant_high = d * q_high.to(DTYPE)  # Shape: [16]
 
         CTX.store_output(out_tensor_ptr, dequant_low, dequant_high)
 
@@ -624,7 +627,7 @@ class KernelImpl_Q5_1(KernelImpl_Legacy):
         block_start_ptr,
         out_tensor_ptr,
         CTX: tl.constexpr,
-        OUT_DTYPE: tl.constexpr,
+        DTYPE: tl.constexpr,
     ) -> None:
         offsets_16 = tl.arange(0, 16)
 
@@ -635,8 +638,8 @@ class KernelImpl_Q5_1(KernelImpl_Legacy):
         qs_ptr = block_start_ptr + 8
 
         # 1. Load the scales 'd', 'm' and the high-bit mask 'qh'.
-        d = tl.load(d_ptr.to(tl.pointer_type(tl.float16))).to(OUT_DTYPE)
-        m = tl.load(m_ptr.to(tl.pointer_type(tl.float16))).to(OUT_DTYPE)
+        d = tl.load(d_ptr.to(tl.pointer_type(tl.float16))).to(DTYPE)
+        m = tl.load(m_ptr.to(tl.pointer_type(tl.float16))).to(DTYPE)
         # This is a safe aligned load because TYPE_SIZE (24) and qh offset (4) are multiples of 4.
         qh_word = tl.load(qh_ptr.to(tl.pointer_type(tl.uint32)))
 
@@ -646,13 +649,13 @@ class KernelImpl_Q5_1(KernelImpl_Legacy):
         # --- Process the first 16 values ---
         ql_low = qs_bytes_16 & 0x0F
         qh_low = (qh_word >> offsets_16) & 1
-        q_low = (ql_low | (qh_low << 4)).to(OUT_DTYPE)
+        q_low = (ql_low | (qh_low << 4)).to(DTYPE)
         dequant_low = d * q_low + m
 
         # --- Process the second 16 values ---
         ql_high = qs_bytes_16 >> 4
         qh_high = (qh_word >> (offsets_16 + 16)) & 1
-        q_high = (ql_high | (qh_high << 4)).to(OUT_DTYPE)
+        q_high = (ql_high | (qh_high << 4)).to(DTYPE)
         dequant_high = d * q_high + m
 
         CTX.store_output(out_tensor_ptr, dequant_low, dequant_high)
