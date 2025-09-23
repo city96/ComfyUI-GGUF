@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field as dcfield
-from typing import Any, Callable, NamedTuple, TypeVar, cast
+from typing import Any, NamedTuple
 
 import torch
 import triton

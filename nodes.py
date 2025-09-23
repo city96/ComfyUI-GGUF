@@ -14,7 +14,7 @@ import folder_paths
 
 from .ops import GGMLOps, move_patch_to_device
 from .loader import gguf_sd_loader, gguf_clip_loader
-from .dequant import is_quantized, is_torch_compatible
+from .dequant import is_quantized, is_torch_compatible, HAVE_TRITON, triton_dequantize_functions
 from . import dequant
 
 def update_folder_names_and_paths(key, targets=[]):
@@ -184,13 +184,26 @@ class UnetLoaderGGUFAdvanced(UnetLoaderGGUF):
     @classmethod
     def INPUT_TYPES(s):
         unet_names = [x for x in folder_paths.get_filename_list("unet_gguf")]
+        pretty_triton_quants = ", ".join(k.name for k in triton_dequantize_functions)
         return {
             "required": {
                 "unet_name": (unet_names,),
-                "dequant_dtype": (["default", "target", "float32", "float16", "bfloat16"], {"default": "default"}),
-                "patch_dtype": (["default", "target", "float32", "float16", "bfloat16"], {"default": "default"}),
+                "dequant_dtype": (
+                    ["default", "target", "float32", "float16", "bfloat16"],
+                    {"default": "default"},
+                ),
+                "patch_dtype": (
+                    ["default", "target", "float32", "float16", "bfloat16"],
+                    {"default": "default"},
+                ),
                 "patch_on_device": ("BOOLEAN", {"default": False}),
-                "optimize": (("none", "compile", "triton"), {"default": "none"}),
+                "optimize": (
+                    ("none", "compile", "triton"),
+                    {
+                        "default": "none",
+                        "tooltip": f"Triton status: {'available' if HAVE_TRITON else 'unavailable'}\nTriton kernels: {pretty_triton_quants}",
+                    },
+                ),
             }
         }
     TITLE = "Unet Loader (GGUF/Advanced)"
@@ -235,7 +248,7 @@ class CLIPLoaderGGUF:
             clip_type = clip_type,
             state_dicts = clip_data,
             model_options = {
-                "custom_operations": GGMLOps,
+                "custom_operations": GGMLOps(),
                 "initial_device": comfy.model_management.text_encoder_offload_device()
             },
             embedding_directory = folder_paths.get_folder_paths("embeddings"),
