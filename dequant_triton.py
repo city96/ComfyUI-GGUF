@@ -23,6 +23,9 @@ TORCH_TO_TRITON_DTYPE_MAP: dict[torch.dtype, tl.dtype] = {
 )
 
 _DEFAULT_AUTOTUNE_CONFIGS: list[triton.Config] = [
+    triton.Config({"N_BLOCKS_PER_PROG": 1}, num_warps=2),
+    triton.Config({"N_BLOCKS_PER_PROG": 2}, num_warps=2),
+    triton.Config({"N_BLOCKS_PER_PROG": 4}, num_warps=2),
     triton.Config({"N_BLOCKS_PER_PROG": 1}, num_warps=4),
     triton.Config({"N_BLOCKS_PER_PROG": 2}, num_warps=4),
     triton.Config({"N_BLOCKS_PER_PROG": 4}, num_warps=4),
@@ -54,24 +57,18 @@ class KernelImpl:
     ) -> None:
         pid = tl.program_id(axis=0)
         start_block_idx = pid * N_BLOCKS_PER_PROG
-
         n_blocks = n_total_blocks - start_block_idx
 
         if n_blocks > 0:
-            block_start_ptr = q_tensor_ptr + start_block_idx * CTX.type_size
-            output_start_ptr = out_tensor_ptr + start_block_idx * CTX.block_size
-
             for i in tl.static_range(N_BLOCKS_PER_PROG):
                 if i < n_blocks:
-                    # Pointer to the i-th quantized block
-                    current_q_ptr = block_start_ptr + i * CTX.type_size
-                    # Pointer to the i-th output block
-                    current_out_ptr = output_start_ptr + i * CTX.block_size
+                    block_offset = start_block_idx + i
+                    quantized_block_ptr = q_tensor_ptr + block_offset * CTX.type_size
+                    output_ptr = out_tensor_ptr + block_offset * CTX.block_size
 
-                    # Call the core helper with a stride of 1 for contiguous output
                     CTX.dequantize_block_kernel(
-                        current_q_ptr,
-                        current_out_ptr,
+                        quantized_block_ptr,
+                        output_ptr,
                         CTX=CTX,
                         DTYPE=DTYPE,
                     )
@@ -272,9 +269,7 @@ class KernelImpl_Q3_K(KernelImpl_K_Quant):
             hscale_2bit = (hscale_byte >> (hscale_shift_index * 2)) & 0x03
 
             scale_6bit = lscale_nibble | (hscale_2bit << 4)
-            final_scale = d_super_scale * (
-                scale_6bit.to(tl.int8, bitcast=True) - 32
-            ).to(DTYPE)
+            final_scale = d_super_scale * (scale_6bit.to(tl.int8) - 32).to(DTYPE)
 
             # --- Map the 16 output elements to their source data ---
             flat_indices = chunk_idx * 16 + offsets_16
@@ -288,7 +283,7 @@ class KernelImpl_Q3_K(KernelImpl_K_Quant):
 
             ql_ptr = qs_ptr + ql_segment * 32 + ql_source_col
             ql_byte = tl.load(ql_ptr)
-            ql_vec = ((ql_byte >> (ql_shift_group * 2)) & 3).to(tl.int8, bitcast=True)
+            ql_vec = ((ql_byte >> (ql_shift_group * 2)) & 3).to(tl.int8)
 
             # 3. Unpack qh (higher 1 bit, inverted).
             qh_source_row = flat_indices // 32
@@ -296,7 +291,7 @@ class KernelImpl_Q3_K(KernelImpl_K_Quant):
 
             qh_ptr = hmask_ptr + qh_source_col
             qh_byte = tl.load(qh_ptr)
-            qh_vec = (((qh_byte >> qh_source_row) & 1) ^ 1).to(tl.int8, bitcast=True)
+            qh_vec = (((qh_byte >> qh_source_row) & 1) ^ 1).to(tl.int8)
 
             # 4. Combine to get the final 3-bit quantized value.
             q_vec = ql_vec - (qh_vec << 2)
@@ -608,12 +603,12 @@ class KernelImpl_Q5_0(KernelImpl_Legacy):
 
         ql_low = qs_bytes_16 & 0x0F
         qh_low = (qh_word >> offsets_16) & 1
-        q_low = (ql_low | (qh_low << 4)).to(tl.int8, bitcast=True) - 16
+        q_low = (ql_low | (qh_low << 4)).to(tl.int8) - 16
         dequant_low = d * q_low.to(DTYPE)  # Shape: [16]
 
         ql_high = qs_bytes_16 >> 4
         qh_high = (qh_word >> (offsets_16 + 16)) & 1
-        q_high = (ql_high | (qh_high << 4)).to(tl.int8, bitcast=True) - 16
+        q_high = (ql_high | (qh_high << 4)).to(tl.int8) - 16
         dequant_high = d * q_high.to(DTYPE)  # Shape: [16]
 
         CTX.store_output(out_tensor_ptr, dequant_low, dequant_high)
@@ -661,11 +656,35 @@ class KernelImpl_Q5_1(KernelImpl_Legacy):
         CTX.store_output(out_tensor_ptr, dequant_low, dequant_high)
 
 
+@dataclass
+class KernelImpl_Q8_0(KernelImpl_Legacy):
+    @staticmethod
+    @triton.jit
+    def dequantize_block_kernel(
+        block_start_ptr,
+        out_tensor_ptr,
+        CTX: tl.constexpr,
+        DTYPE: tl.constexpr,
+    ) -> None:
+        offsets_32 = tl.arange(0, 32)
+        d_ptr = block_start_ptr.to(tl.pointer_type(tl.float16), bitcast=True) + 0
+        x_ptr = (
+            block_start_ptr.to(tl.pointer_type(tl.int8), bitcast=True) + 2 + offsets_32
+        )
+        output_ptr = out_tensor_ptr + offsets_32
+        d = d = tl.load(d_ptr).to(DTYPE)
+        x = tl.load(x_ptr).to(DTYPE)
+        output_ptr.store(d * x)
+
+
 dequantize_functions: dict[GGMLQuantizationType, KernelDefinition] = {
+    # Legancy quants
     GQT.Q4_0: KernelDefinition.build(GQT.Q4_0, KernelImpl_Q4_0),
     GQT.Q4_1: KernelDefinition.build(GQT.Q4_1, KernelImpl_Q4_1),
     GQT.Q5_0: KernelDefinition.build(GQT.Q5_0, KernelImpl_Q5_0),
     GQT.Q5_1: KernelDefinition.build(GQT.Q5_1, KernelImpl_Q5_1),
+    GQT.Q8_0: KernelDefinition.build(GQT.Q8_0, KernelImpl_Q8_0),
+    # K-quants
     GQT.Q2_K: KernelDefinition.build(GQT.Q2_K, KernelImpl_Q2_K),
     GQT.Q3_K: KernelDefinition.build(GQT.Q3_K, KernelImpl_Q3_K),
     GQT.Q4_K: KernelDefinition.build(GQT.Q4_K, KernelImpl_Q4_K),
