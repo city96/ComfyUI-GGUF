@@ -8,6 +8,29 @@ import triton
 import triton.language as tl
 from gguf import GGML_QUANT_SIZES, GGMLQuantizationType
 
+TRITON_MAJOR, TRITON_MINOR = (
+    int(part) for part in triton.__version__.split(".", 3)[:2]
+)
+
+# This static method stuff may not be necessary. Right now, Triton doesn't pass self
+# in 3.3 or 3.4 whether or not the method is decorated with staticmethod. Just afraid of that
+# changing and breaking stuff in future versions. Triton 3.4+ can deal with the staticmethod decorator.
+if TRITON_MAJOR == 3 and TRITON_MINOR <= 3:
+
+    def maybestaticmethod(c: Any) -> Any:
+        return c
+elif TRITON_MAJOR == 3 and TRITON_MINOR >= 4:
+    maybestaticmethod = staticmethod
+elif TRITON_MAJOR < 3:
+    raise RuntimeError(
+        f"Triton major versions less than 3 not supported, you have {triton.__version__}"
+    )
+else:
+    print(
+        f"\n*** GGUF Triton: Your Triton version of {triton.__version__} has not been tested and may not work correctly."
+    )
+    maybestaticmethod = staticmethod
+
 GQT = GGMLQuantizationType
 
 K_SCALE_SIZE = 12
@@ -45,7 +68,7 @@ class KernelImpl:
     def get_autotuner(self, **kwargs: dict) -> triton.runtime.Autotuner:
         return triton.autotune(**kwargs)(self.dequantize_kernel)
 
-    @staticmethod
+    @maybestaticmethod
     @triton.jit
     def dequantize_kernel(
         q_tensor_ptr,
@@ -63,10 +86,12 @@ class KernelImpl:
             for i in tl.static_range(N_BLOCKS_PER_PROG):
                 if i < n_blocks:
                     block_offset = start_block_idx + i
-                    quantized_block_ptr = q_tensor_ptr + block_offset * CTX.type_size
-                    output_ptr = out_tensor_ptr + block_offset * CTX.block_size
+                    quantized_block_ptr = (
+                        q_tensor_ptr + block_offset * CTX.value.type_size
+                    )
+                    output_ptr = out_tensor_ptr + block_offset * CTX.value.block_size
 
-                    CTX.dequantize_block_kernel(
+                    CTX.value.dequantize_block_kernel(
                         quantized_block_ptr,
                         output_ptr,
                         CTX=CTX,
@@ -174,7 +199,7 @@ class KernelImpl_K_Quant(KernelImpl):
 
 @dataclass
 class KernelImpl_Q2_K(KernelImpl_K_Quant):
-    @staticmethod
+    @maybestaticmethod
     @triton.jit
     def dequantize_block_kernel(
         block_start_ptr,
@@ -233,7 +258,7 @@ class KernelImpl_Q2_K(KernelImpl_K_Quant):
 
 @dataclass
 class KernelImpl_Q3_K(KernelImpl_K_Quant):
-    @staticmethod
+    @maybestaticmethod
     @triton.jit
     def dequantize_block_kernel(
         block_start_ptr,
@@ -305,7 +330,7 @@ class KernelImpl_Q3_K(KernelImpl_K_Quant):
 @dataclass
 class KernelImpl_Q4_K(KernelImpl_K_Quant):
     # Helper function, shared by Q4_K and Q5_K.
-    @staticmethod
+    @maybestaticmethod
     @triton.jit
     def get_scales_min(
         k_idx: int,
@@ -328,7 +353,7 @@ class KernelImpl_Q4_K(KernelImpl_K_Quant):
             m = ((m_sc_byte & 0xFF) >> 4) | ((m_byte >> 2) & 0x30)
         return tl.tuple((sc, m))
 
-    @staticmethod
+    @maybestaticmethod
     @triton.jit
     def dequantize_block_kernel(
         block_start_ptr,
@@ -337,7 +362,7 @@ class KernelImpl_Q4_K(KernelImpl_K_Quant):
         DTYPE: tl.constexpr,
     ) -> None:
         offsets_32 = tl.arange(0, 32)
-        offsets_scale = offsets_32 + 4 + CTX.k_scale_size
+        offsets_scale = offsets_32 + 4 + CTX.value.k_scale_size
 
         d = tl.load(block_start_ptr.to(tl.pointer_type(tl.float16))).to(DTYPE)
         dmin = tl.load((block_start_ptr + 2).to(tl.pointer_type(tl.float16))).to(DTYPE)
@@ -354,10 +379,12 @@ class KernelImpl_Q4_K(KernelImpl_K_Quant):
             k_idx = 2 * k_chunk
 
             # --- Get scale A (for low nibbles) ---
-            sc_a, m_a = CTX.get_scales_min(k_idx, d_sc_word, m_word, m_sc_word)
+            sc_a, m_a = CTX.value.get_scales_min(k_idx, d_sc_word, m_word, m_sc_word)
 
             # --- Get scale B (for high nibbles) ---
-            sc_b, m_b = CTX.get_scales_min(k_idx + 1, d_sc_word, m_word, m_sc_word)
+            sc_b, m_b = CTX.value.get_scales_min(
+                k_idx + 1, d_sc_word, m_word, m_sc_word
+            )
 
             current_d_a = d * sc_a.to(DTYPE)
             current_dm_a = dmin * m_a.to(DTYPE)
@@ -382,7 +409,7 @@ class KernelImpl_Q4_K(KernelImpl_K_Quant):
 
 @dataclass
 class KernelImpl_Q5_K(KernelImpl_Q4_K):
-    @staticmethod
+    @maybestaticmethod
     @triton.jit
     def dequantize_block_kernel(
         block_start_ptr,
@@ -391,7 +418,7 @@ class KernelImpl_Q5_K(KernelImpl_Q4_K):
         DTYPE: tl.constexpr,
     ) -> None:
         offsets_32 = tl.arange(0, 32)
-        offsets_scale = offsets_32 + 4 + CTX.k_scale_size
+        offsets_scale = offsets_32 + 4 + CTX.value.k_scale_size
 
         # Pointers and initial loads
         d = tl.load(block_start_ptr.to(tl.pointer_type(tl.float16))).to(DTYPE)
@@ -403,14 +430,14 @@ class KernelImpl_Q5_K(KernelImpl_Q4_K):
         m_sc_word = tl.load(scales_ptr_u32 + 2)
 
         qh_start_ptr = block_start_ptr + offsets_scale
-        qs_start_ptr = qh_start_ptr + CTX.block_size // 8
+        qs_start_ptr = qh_start_ptr + CTX.value.block_size // 8
 
         qh_bytes_all = tl.load(qh_start_ptr)
 
         # Process in 8 chunks of 32 values
         for chunk_idx in tl.static_range(8):
             # # 1. Unpack scale and min for this chunk
-            sc, m = CTX.get_scales_min(chunk_idx, d_sc_word, m_word, m_sc_word)
+            sc, m = CTX.value.get_scales_min(chunk_idx, d_sc_word, m_word, m_sc_word)
 
             final_d = d * sc.to(DTYPE)
             final_dm = dmin * m.to(DTYPE)
@@ -434,7 +461,7 @@ class KernelImpl_Q5_K(KernelImpl_Q4_K):
 
 @dataclass
 class KernelImpl_Q6_K(KernelImpl_K_Quant):
-    @staticmethod
+    @maybestaticmethod
     @triton.jit
     def dequantize_block_kernel(
         block_start_ptr,
@@ -495,7 +522,7 @@ class KernelImpl_Q6_K(KernelImpl_K_Quant):
 
 @dataclass
 class KernelImpl_Legacy(KernelImpl):
-    @staticmethod
+    @maybestaticmethod
     @triton.jit
     def store_output(out_tensor_ptr, dequant_low, dequant_high) -> None:
         offsets_16 = tl.arange(0, 16)
@@ -510,7 +537,7 @@ class KernelImpl_Legacy(KernelImpl):
 
 @dataclass
 class KernelImpl_Q4_0(KernelImpl_Legacy):
-    @staticmethod
+    @maybestaticmethod
     @triton.jit
     def dequantize_block_kernel(
         block_start_ptr,
@@ -542,12 +569,12 @@ class KernelImpl_Q4_0(KernelImpl_Legacy):
         dequant_low = d * q_low.to(DTYPE)
         dequant_high = d * q_high.to(DTYPE)
 
-        CTX.store_output(out_tensor_ptr, dequant_low, dequant_high)
+        CTX.value.store_output(out_tensor_ptr, dequant_low, dequant_high)
 
 
 @dataclass
 class KernelImpl_Q4_1(KernelImpl_Legacy):
-    @staticmethod
+    @maybestaticmethod
     @triton.jit
     def dequantize_block_kernel(
         block_start_ptr,
@@ -577,12 +604,12 @@ class KernelImpl_Q4_1(KernelImpl_Legacy):
         dequant_low = d * qs_low + m
         dequant_high = d * qs_high + m
 
-        CTX.store_output(out_tensor_ptr, dequant_low, dequant_high)
+        CTX.value.store_output(out_tensor_ptr, dequant_low, dequant_high)
 
 
 @dataclass
 class KernelImpl_Q5_0(KernelImpl_Legacy):
-    @staticmethod
+    @maybestaticmethod
     @triton.jit
     def dequantize_block_kernel(
         block_start_ptr,
@@ -598,7 +625,8 @@ class KernelImpl_Q5_0(KernelImpl_Legacy):
         qs_ptr = block_start_ptr + 6
 
         d = tl.load(d_ptr.to(tl.pointer_type(tl.float16))).to(DTYPE)
-        qh_word = (tl.load(qh_ptr + offsets_4).to(tl.uint32) << (offsets_4 << 3)).sum()
+        qh_word = tl.sum(tl.load(qh_ptr + offsets_4).to(tl.uint32) << (offsets_4 << 3))
+
         qs_bytes_16 = tl.load(qs_ptr + offsets_16)
 
         ql_low = qs_bytes_16 & 0x0F
@@ -611,12 +639,12 @@ class KernelImpl_Q5_0(KernelImpl_Legacy):
         q_high = (ql_high | (qh_high << 4)).to(tl.int8) - 16
         dequant_high = d * q_high.to(DTYPE)  # Shape: [16]
 
-        CTX.store_output(out_tensor_ptr, dequant_low, dequant_high)
+        CTX.value.store_output(out_tensor_ptr, dequant_low, dequant_high)
 
 
 @dataclass
 class KernelImpl_Q5_1(KernelImpl_Legacy):
-    @staticmethod
+    @maybestaticmethod
     @triton.jit
     def dequantize_block_kernel(
         block_start_ptr,
@@ -653,12 +681,12 @@ class KernelImpl_Q5_1(KernelImpl_Legacy):
         q_high = (ql_high | (qh_high << 4)).to(DTYPE)
         dequant_high = d * q_high + m
 
-        CTX.store_output(out_tensor_ptr, dequant_low, dequant_high)
+        CTX.value.store_output(out_tensor_ptr, dequant_low, dequant_high)
 
 
 @dataclass
 class KernelImpl_Q8_0(KernelImpl_Legacy):
-    @staticmethod
+    @maybestaticmethod
     @triton.jit
     def dequantize_block_kernel(
         block_start_ptr,
