@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field as dcfield
-from typing import Any, NamedTuple
+from typing import Any, TypeVar
 
 import torch
 import triton
 import triton.language as tl
 from gguf import GGML_QUANT_SIZES, GGMLQuantizationType
+
+C = TypeVar("C")
+def passthroughdecorator(c: C) -> C:
+    return c
+
+nocompiledecorator = getattr(getattr(torch, "compiler", None), "disable", None) or passthroughdecorator
 
 TRITON_MAJOR, TRITON_MINOR = (
     int(part) for part in triton.__version__.split(".", 3)[:2]
@@ -16,9 +22,7 @@ TRITON_MAJOR, TRITON_MINOR = (
 # in 3.3 or 3.4 whether or not the method is decorated with staticmethod. Just afraid of that
 # changing and breaking stuff in future versions. Triton 3.4+ can deal with the staticmethod decorator.
 if TRITON_MAJOR == 3 and TRITON_MINOR <= 3:
-
-    def maybestaticmethod(c: Any) -> Any:
-        return c
+    maybestaticmethod = passthroughdecorator
 elif TRITON_MAJOR == 3 and TRITON_MINOR >= 4:
     maybestaticmethod = staticmethod
 elif TRITON_MAJOR < 3:
@@ -39,11 +43,7 @@ TORCH_TO_TRITON_DTYPE_MAP: dict[torch.dtype, tl.dtype] = {
     torch.float32: tl.float32,
     torch.float16: tl.float16,
     torch.bfloat16: tl.bfloat16,
-} | (
-    {torch.float8_e4m3fn: tl.float8e4nv}
-    if hasattr(torch, "float8_e4m3fn") and hasattr(tl, "float8e4nv")
-    else {}
-)
+}
 
 _DEFAULT_AUTOTUNE_CONFIGS: list[triton.Config] = [
     triton.Config({"N_BLOCKS_PER_PROG": 1}, num_warps=2),
@@ -60,7 +60,7 @@ _DEFAULT_AUTOTUNE_CONFIGS: list[triton.Config] = [
 _AUTOTUNE_CONFIGS: dict[str, list[triton.Config]] = {}
 
 
-@dataclass
+@dataclass(frozen=True)
 class KernelImpl:
     type_size: tl.constexpr
     block_size: tl.constexpr
@@ -70,14 +70,7 @@ class KernelImpl:
 
     @maybestaticmethod
     @triton.jit
-    def dequantize_kernel(
-        q_tensor_ptr,
-        out_tensor_ptr,
-        n_total_blocks,
-        DTYPE: tl.constexpr,
-        N_BLOCKS_PER_PROG: tl.constexpr,
-        CTX: tl.constexpr,
-    ) -> None:
+    def dequantize_kernel(q_tensor_ptr, out_tensor_ptr, n_total_blocks, DTYPE: tl.constexpr, N_BLOCKS_PER_PROG: tl.constexpr, CTX: tl.constexpr) -> None:
         pid = tl.program_id(axis=0)
         start_block_idx = pid * N_BLOCKS_PER_PROG
         n_blocks = n_total_blocks - start_block_idx
@@ -94,24 +87,19 @@ class KernelImpl:
                     CTX.value.dequantize_block_kernel(
                         quantized_block_ptr,
                         output_ptr,
-                        CTX=CTX,
+                        CTX=tl.constexpr(CTX),
                         DTYPE=DTYPE,
                     )
 
 
-class KernelDefinition(NamedTuple):
+class KernelDefinition:
     qtype: GGMLQuantizationType
     block_size: int
     type_size: int
     kernel: KernelImpl
     autotuner_kernel: triton.runtime.Autotuner
 
-    @classmethod
-    def build(
-        cls,
-        qtype: GGMLQuantizationType,
-        kernel_class: type[KernelImpl],
-    ) -> "KernelDefinition":
+    def __init__(self, qtype: GGMLQuantizationType, kernel_class: type[KernelImpl]):
         block_size, type_size = GGML_QUANT_SIZES[qtype]
         kernel_instance = kernel_class(
             block_size=tl.constexpr(block_size),
@@ -123,22 +111,15 @@ class KernelDefinition(NamedTuple):
             ),
             key=["n_total_blocks"],
         )
-        return cls(
-            qtype=qtype,
-            block_size=block_size,
-            type_size=type_size,
-            kernel=kernel_instance,
-            autotuner_kernel=autotuner_kernel,
-        )
+        self.qtype = qtype
+        self.block_size = block_size
+        self.type_size = type_size
+        self.kernel = kernel_instance
+        self.autotuner_kernel = autotuner_kernel
 
-    def __call__(
-        self,
-        blocks: torch.Tensor,
-        block_size: int,
-        type_size: int,
-        dtype: torch.dtype | None = None,
-        _math_dtype: tl.dtype | None = tl.float32,
-    ) -> torch.Tensor:
+
+    @nocompiledecorator
+    def __call__(self, blocks: torch.Tensor, block_size: int, type_size: int, dtype: torch.dtype | None = None, _math_dtype: tl.dtype | None = tl.float32) -> torch.Tensor:
         qtype, ggml_type_size = self.qtype, self.type_size
         if blocks.dtype != torch.uint8:
             if blocks.dtype == torch.int8:
@@ -190,23 +171,18 @@ class KernelDefinition(NamedTuple):
 ### K-quants
 
 
-@dataclass
+@dataclass(frozen=True)
 class KernelImpl_K_Quant(KernelImpl):
     k_scale_size: tl.constexpr = dcfield(
         default_factory=lambda: tl.constexpr(K_SCALE_SIZE)
     )
 
 
-@dataclass
+@dataclass(frozen=True)
 class KernelImpl_Q2_K(KernelImpl_K_Quant):
     @maybestaticmethod
     @triton.jit
-    def dequantize_block_kernel(
-        block_start_ptr,
-        out_tensor_ptr,
-        CTX: tl.constexpr,
-        DTYPE: tl.constexpr,
-    ) -> None:
+    def dequantize_block_kernel(block_start_ptr, out_tensor_ptr, CTX: tl.constexpr, DTYPE: tl.constexpr) -> None:
         # Vector of offsets for a 16-element chunk
         offsets_16 = tl.arange(0, 16)
 
@@ -256,16 +232,11 @@ class KernelImpl_Q2_K(KernelImpl_K_Quant):
             tl.store(output_ptr + offsets_16, dequant_16)
 
 
-@dataclass
+@dataclass(frozen=True)
 class KernelImpl_Q3_K(KernelImpl_K_Quant):
     @maybestaticmethod
     @triton.jit
-    def dequantize_block_kernel(
-        block_start_ptr,
-        out_tensor_ptr,
-        CTX: tl.constexpr,
-        DTYPE: tl.constexpr,
-    ) -> None:
+    def dequantize_block_kernel(block_start_ptr, out_tensor_ptr, CTX: tl.constexpr, DTYPE: tl.constexpr) -> None:
         # Vector of offsets for a 16-element chunk (one row of the output matrix)
         offsets_16 = tl.arange(0, 16)
 
@@ -327,17 +298,12 @@ class KernelImpl_Q3_K(KernelImpl_K_Quant):
             tl.store(output_ptr, dequant_16)
 
 
-@dataclass
+@dataclass(frozen=True)
 class KernelImpl_Q4_K(KernelImpl_K_Quant):
     # Helper function, shared by Q4_K and Q5_K.
     @maybestaticmethod
     @triton.jit
-    def get_scales_min(
-        k_idx: int,
-        d_sc_word: tl.tensor,
-        m_word: tl.tensor,
-        m_sc_word: tl.tensor,
-    ) -> tl.tuple:
+    def get_scales_min(k_idx: int, d_sc_word: tl.tensor, m_word: tl.tensor, m_sc_word: tl.tensor) -> tl.tuple:
         if k_idx < 4:
             k_idx_x8 = k_idx * 8
             d_sc_byte = d_sc_word >> k_idx_x8
@@ -355,12 +321,7 @@ class KernelImpl_Q4_K(KernelImpl_K_Quant):
 
     @maybestaticmethod
     @triton.jit
-    def dequantize_block_kernel(
-        block_start_ptr,
-        out_tensor_ptr,
-        CTX: tl.constexpr,
-        DTYPE: tl.constexpr,
-    ) -> None:
+    def dequantize_block_kernel(block_start_ptr, out_tensor_ptr, CTX: tl.constexpr, DTYPE: tl.constexpr) -> None:
         offsets_32 = tl.arange(0, 32)
         offsets_scale = offsets_32 + 4 + CTX.value.k_scale_size
 
@@ -407,16 +368,11 @@ class KernelImpl_Q4_K(KernelImpl_K_Quant):
             (output_chunk_ptr + 32).store(dequant_high)
 
 
-@dataclass
+@dataclass(frozen=True)
 class KernelImpl_Q5_K(KernelImpl_Q4_K):
     @maybestaticmethod
     @triton.jit
-    def dequantize_block_kernel(
-        block_start_ptr,
-        out_tensor_ptr,
-        CTX: tl.constexpr,
-        DTYPE: tl.constexpr,
-    ) -> None:
+    def dequantize_block_kernel(block_start_ptr, out_tensor_ptr, CTX: tl.constexpr, DTYPE: tl.constexpr) -> None:
         offsets_32 = tl.arange(0, 32)
         offsets_scale = offsets_32 + 4 + CTX.value.k_scale_size
 
@@ -459,16 +415,11 @@ class KernelImpl_Q5_K(KernelImpl_Q4_K):
             output_ptr.store(dequant_32)
 
 
-@dataclass
+@dataclass(frozen=True)
 class KernelImpl_Q6_K(KernelImpl_K_Quant):
     @maybestaticmethod
     @triton.jit
-    def dequantize_block_kernel(
-        block_start_ptr,
-        out_tensor_ptr,
-        CTX: tl.constexpr,
-        DTYPE: tl.constexpr,
-    ) -> None:
+    def dequantize_block_kernel(block_start_ptr, out_tensor_ptr, CTX: tl.constexpr, DTYPE: tl.constexpr) -> None:
         offsets_32 = tl.arange(0, 32)
         mask_16 = offsets_32 < 16
 
@@ -520,7 +471,7 @@ class KernelImpl_Q6_K(KernelImpl_K_Quant):
 ### Legacy quants
 
 
-@dataclass
+@dataclass(frozen=True)
 class KernelImpl_Legacy(KernelImpl):
     @maybestaticmethod
     @triton.jit
@@ -535,16 +486,11 @@ class KernelImpl_Legacy(KernelImpl):
         out_ptrs_high.store(dequant_high)
 
 
-@dataclass
+@dataclass(frozen=True)
 class KernelImpl_Q4_0(KernelImpl_Legacy):
     @maybestaticmethod
     @triton.jit
-    def dequantize_block_kernel(
-        block_start_ptr,
-        out_tensor_ptr,
-        CTX: tl.constexpr,
-        DTYPE: tl.constexpr,
-    ) -> None:
+    def dequantize_block_kernel(block_start_ptr, out_tensor_ptr, CTX: tl.constexpr, DTYPE: tl.constexpr) -> None:
         # Vector of offsets for the 16 bytes of quantized data
         offsets_16 = tl.arange(0, 16)
 
@@ -572,16 +518,11 @@ class KernelImpl_Q4_0(KernelImpl_Legacy):
         CTX.value.store_output(out_tensor_ptr, dequant_low, dequant_high)
 
 
-@dataclass
+@dataclass(frozen=True)
 class KernelImpl_Q4_1(KernelImpl_Legacy):
     @maybestaticmethod
     @triton.jit
-    def dequantize_block_kernel(
-        block_start_ptr,
-        out_tensor_ptr,
-        CTX: tl.constexpr,
-        DTYPE: tl.constexpr,
-    ) -> None:
+    def dequantize_block_kernel( block_start_ptr, out_tensor_ptr, CTX: tl.constexpr, DTYPE: tl.constexpr) -> None:
         # Vector of offsets for the 16 bytes of quantized data
         offsets_16 = tl.arange(0, 16)
 
@@ -607,16 +548,11 @@ class KernelImpl_Q4_1(KernelImpl_Legacy):
         CTX.value.store_output(out_tensor_ptr, dequant_low, dequant_high)
 
 
-@dataclass
+@dataclass(frozen=True)
 class KernelImpl_Q5_0(KernelImpl_Legacy):
     @maybestaticmethod
     @triton.jit
-    def dequantize_block_kernel(
-        block_start_ptr,
-        out_tensor_ptr,
-        CTX: tl.constexpr,
-        DTYPE: tl.constexpr,
-    ) -> None:
+    def dequantize_block_kernel(block_start_ptr, out_tensor_ptr, CTX: tl.constexpr, DTYPE: tl.constexpr) -> None:
         offsets_16 = tl.arange(0, 16)
         offsets_4 = tl.arange(0, 4)
 
@@ -642,16 +578,11 @@ class KernelImpl_Q5_0(KernelImpl_Legacy):
         CTX.value.store_output(out_tensor_ptr, dequant_low, dequant_high)
 
 
-@dataclass
+@dataclass(frozen=True)
 class KernelImpl_Q5_1(KernelImpl_Legacy):
     @maybestaticmethod
     @triton.jit
-    def dequantize_block_kernel(
-        block_start_ptr,
-        out_tensor_ptr,
-        CTX: tl.constexpr,
-        DTYPE: tl.constexpr,
-    ) -> None:
+    def dequantize_block_kernel(block_start_ptr, out_tensor_ptr, CTX: tl.constexpr, DTYPE: tl.constexpr) -> None:
         offsets_16 = tl.arange(0, 16)
 
         # Data layout: 2 bytes 'd', 2 bytes 'm', 4 bytes 'qh', 16 bytes 'qs'
@@ -684,16 +615,11 @@ class KernelImpl_Q5_1(KernelImpl_Legacy):
         CTX.value.store_output(out_tensor_ptr, dequant_low, dequant_high)
 
 
-@dataclass
+@dataclass(frozen=True)
 class KernelImpl_Q8_0(KernelImpl_Legacy):
     @maybestaticmethod
     @triton.jit
-    def dequantize_block_kernel(
-        block_start_ptr,
-        out_tensor_ptr,
-        CTX: tl.constexpr,
-        DTYPE: tl.constexpr,
-    ) -> None:
+    def dequantize_block_kernel(block_start_ptr, out_tensor_ptr, CTX: tl.constexpr, DTYPE: tl.constexpr) -> None:
         offsets_32 = tl.arange(0, 32)
         d_ptr = block_start_ptr.to(tl.pointer_type(tl.float16), bitcast=True) + 0
         x_ptr = (
@@ -707,17 +633,17 @@ class KernelImpl_Q8_0(KernelImpl_Legacy):
 
 dequantize_functions: dict[GGMLQuantizationType, KernelDefinition] = {
     # Legancy quants
-    GQT.Q4_0: KernelDefinition.build(GQT.Q4_0, KernelImpl_Q4_0),
-    GQT.Q4_1: KernelDefinition.build(GQT.Q4_1, KernelImpl_Q4_1),
-    GQT.Q5_0: KernelDefinition.build(GQT.Q5_0, KernelImpl_Q5_0),
-    GQT.Q5_1: KernelDefinition.build(GQT.Q5_1, KernelImpl_Q5_1),
-    GQT.Q8_0: KernelDefinition.build(GQT.Q8_0, KernelImpl_Q8_0),
+    GQT.Q4_0: KernelDefinition(GQT.Q4_0, KernelImpl_Q4_0),
+    GQT.Q4_1: KernelDefinition(GQT.Q4_1, KernelImpl_Q4_1),
+    GQT.Q5_0: KernelDefinition(GQT.Q5_0, KernelImpl_Q5_0),
+    GQT.Q5_1: KernelDefinition(GQT.Q5_1, KernelImpl_Q5_1),
+    GQT.Q8_0: KernelDefinition(GQT.Q8_0, KernelImpl_Q8_0),
     # K-quants
-    GQT.Q2_K: KernelDefinition.build(GQT.Q2_K, KernelImpl_Q2_K),
-    GQT.Q3_K: KernelDefinition.build(GQT.Q3_K, KernelImpl_Q3_K),
-    GQT.Q4_K: KernelDefinition.build(GQT.Q4_K, KernelImpl_Q4_K),
-    GQT.Q5_K: KernelDefinition.build(GQT.Q5_K, KernelImpl_Q5_K),
-    GQT.Q6_K: KernelDefinition.build(GQT.Q6_K, KernelImpl_Q6_K),
+    GQT.Q2_K: KernelDefinition(GQT.Q2_K, KernelImpl_Q2_K),
+    GQT.Q3_K: KernelDefinition(GQT.Q3_K, KernelImpl_Q3_K),
+    GQT.Q4_K: KernelDefinition(GQT.Q4_K, KernelImpl_Q4_K),
+    GQT.Q5_K: KernelDefinition(GQT.Q5_K, KernelImpl_Q5_K),
+    GQT.Q6_K: KernelDefinition(GQT.Q6_K, KernelImpl_Q6_K),
 }
 
 __all__ = ("dequantize_functions",)
