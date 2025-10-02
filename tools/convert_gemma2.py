@@ -1,5 +1,3 @@
-# (c) City96 || Apache-2.0
-# Gemma2 safetensors -> GGUF 专用转换脚本，保留全部精度和元数据
 import os
 import argparse
 import logging
@@ -8,7 +6,6 @@ import torch
 import gguf
 from tqdm import tqdm
 
-# Gemma2 key映射表（safetensors -> gguf）
 KEY_MAP = {
     # embedding
     "model.embed_tokens.weight": "token_embd.weight",
@@ -18,7 +15,6 @@ KEY_MAP = {
     "spiece_model": "tokenizer.ggml.spiece_model_raw",
 }
 
-# 层参数映射
 LAYER_KEY_MAP = {
     # LayerNorm
     "input_layernorm.weight": "attn_norm.weight",
@@ -48,23 +44,20 @@ def parse_args():
 
 
 def map_key(key):
-    # 直接映射
     if key in KEY_MAP:
         return KEY_MAP[key]
-    # 层参数映射
     import re
     m = re.match(r"model.layers.(\d+)\.(.+)", key)
     if m:
         layer_idx, subkey = m.groups()
         if subkey in LAYER_KEY_MAP:
             return f"blk.{layer_idx}.{LAYER_KEY_MAP[subkey]}"
-    return key  # 其他直接保留
+    return key
 
 
 def main():
     args = parse_args()
     state_dict = load_file(args.src)
-    # 统计主精度
     dtypes = [v.dtype for v in state_dict.values() if hasattr(v, 'dtype')]
     main_dtype = max(set(dtypes), key=dtypes.count) if dtypes else torch.float16
     if main_dtype == torch.float32:
@@ -81,11 +74,9 @@ def main():
         input(f"输出文件 {dst} 已存在，按回车覆盖或 Ctrl+C 取消...")
     writer = gguf.GGUFWriter(path=None, arch="gemma2")
     writer.add_quantization_version(gguf.GGML_QUANT_VERSION)
-    # 处理所有权重
     for key, value in tqdm(state_dict.items()):
         new_key = map_key(key)
         if key == "spiece_model":
-            # 转为 int8 存储，保证 gguf 支持
             arr = value.cpu().numpy().astype("int8")
             writer.add_tensor(new_key, arr, raw_dtype=gguf.GGMLQuantizationType.I8)
             tqdm.write(f"{key} -> {new_key} (spiece_model, {arr.shape} bytes, int8)")
@@ -94,14 +85,12 @@ def main():
             tqdm.write(f"跳过非张量: {key}")
             continue
         arr = value.cpu().numpy()
-        # 精度策略：norm 层全部 F32，embedding/attn/mlp 优先 F16
-        # norm 层 key 统一处理
+        # norm 层全部 F32，embedding/attn/mlp 优先 F16
         norm_keys = [
             "attn_norm.weight", "post_attention_norm.weight", "post_ffw_norm.weight", "ffn_norm.weight", "output_norm.weight"
         ]
         # embedding key
         emb_keys = ["token_embd.weight"]
-        # 判断是否 norm 层
         is_norm = any(new_key.endswith(nk) for nk in norm_keys)
         is_emb = any(new_key == ek for ek in emb_keys)
         # norm 层只有原始为 float32/bfloat16 时才保留 F32，否则保持原始 dtype
@@ -120,7 +109,6 @@ def main():
             qtype = gguf.GGMLQuantizationType.F16
         writer.add_tensor(new_key, gguf.quants.quantize(arr, qtype), raw_dtype=qtype)
         tqdm.write(f"{key} -> {new_key}, {value.dtype} -> {qtype.name}, shape={arr.shape}")
-    # 写入文件
     writer.write_header_to_file(path=dst)
     writer.write_kv_data_to_file()
     writer.write_tensors_to_file(progress=True)
@@ -129,3 +117,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
