@@ -181,7 +181,7 @@ GEMMA2_SD_MAP = {
     ".attn_norm.weight": ".input_layernorm.weight",
     ".post_attention_norm.weight": ".post_attention_layernorm.weight",
     ".post_ffw_norm.weight": ".post_feedforward_layernorm.weight",
-    ".ffn_norm.weight": ".pre_feedforward_layernorm.weight",  # Gemma2 safetensors 只有 pre_feedforward_layernorm
+    ".ffn_norm.weight": ".pre_feedforward_layernorm.weight",  # Gemma2 safetensors only has pre_feedforward_layernorm
     # MLP
     ".ffn_up.weight": ".mlp.up_proj.weight",
     ".ffn_down.weight": ".mlp.down_proj.weight",
@@ -333,147 +333,17 @@ def gguf_tokenizer_loader(path, temb_shape):
             return torch.ByteTensor(list(proto_bytes))
         except Exception as e:
             logging.warning(f"Failed to parse proto from int8 tensor: {e}")
-            # 继续 fallback
-    # fallback: 兼容旧字符串字段
+    spiece_tensor = reader.get_tensor("tokenizer.ggml.spiece_model_raw")
+    if spiece_tensor is not None:
+        del reader
+        return spiece_tensor
     raw_proto_field = get_field(reader, "tokenizer.ggml.spiece_model_raw", str)
     if raw_proto_field is not None:
-        try:
-            proto_bytes = raw_proto_field.encode('latin1')
-            spm = model.ModelProto()
-            spm.ParseFromString(proto_bytes)
-            vocab_size = len(spm.pieces)
-            logging.info(f"✓ Loaded complete sentencepiece proto from GGUF metadata: {vocab_size} pieces, "
-                        f"{len(proto_bytes)} bytes (legacy string field)")
-            logging.info(f"  unk_id={spm.trainer_spec.unk_id}, bos_id={spm.trainer_spec.bos_id}, "
-                        f"eos_id={spm.trainer_spec.eos_id}, pad_id={spm.trainer_spec.pad_id}")
-            if temb_shape[0] != vocab_size:
-                logging.warning(f"Proto vocab_size ({vocab_size}) != embedding shape[0] ({temb_shape[0]})")
-            del reader
-            return torch.ByteTensor(list(proto_bytes))
-        except Exception as e:
-            logging.warning(f"Failed to load complete proto from metadata: {e}")
-            logging.warning("Falling back to reconstructing tokenizer from GGUF fields...")
-    else:
-        logging.info("No complete sentencepiece proto found in GGUF metadata")
-        logging.info("Attempting to recreate sentencepiece tokenizer from GGUF file metadata...")
-    
-    spm = model.ModelProto()
-
-    tokenizer_model = get_field(reader, "tokenizer.ggml.model", str)
-    if tokenizer_model == "t5":
-        if temb_shape == (256384, 4096): # probably UMT5
-            spm.trainer_spec.model_type == 1 # Unigram (do we have a T5 w/ BPE?)
-        else:
-            raise NotImplementedError("Unknown model, can't set tokenizer!")
-    elif tokenizer_model == "llama":
-        # Gemma2 uses llama tokenizer model
-        if temb_shape[0] == 256000: # Gemma2_2B vocab_size
-            spm.trainer_spec.model_type = 1 # Unigram
-        else:
-            raise NotImplementedError("Unknown llama-based model, can't set tokenizer!")
-    else:
-        raise NotImplementedError(f"Unknown tokenizer model '{tokenizer_model}', can't set tokenizer!")
-
-    val = get_field(reader, "tokenizer.ggml.add_space_prefix", bool)
-    spm.normalizer_spec.add_dummy_prefix = val if val is not None else False
-    val = get_field(reader, "tokenizer.ggml.remove_extra_whitespaces", bool)
-    spm.normalizer_spec.remove_extra_whitespaces = val if val is not None else False
-
-    tokens = get_list_field(reader, "tokenizer.ggml.tokens", str)
-    scores = get_list_field(reader, "tokenizer.ggml.scores", float)
-    toktypes = get_list_field(reader, "tokenizer.ggml.token_type", int)
-
-    eos_id = get_field(reader, "tokenizer.ggml.eos_token_id", int)
-    pad_id = get_field(reader, "tokenizer.ggml.padding_token_id", int)
-    unk_id = get_field(reader, "tokenizer.ggml.unknown_token_id", int)
-    bos_id = get_field(reader, "tokenizer.ggml.bos_token_id", int)
-    if unk_id is None:
-        unk_id = get_field(reader, "tokenizer.ggml.unk_token_id", int)
-
-    tokens = list(tokens)
-    scores = list(scores)
-    toktypes = list(toktypes)
-    unk_idxs = [i for i, t in enumerate(tokens) if t == "<unk>"]
-    if unk_idxs:
-        unk_id = unk_idxs[0]
-        tokens[unk_id] = "<unk>"
-        toktypes[unk_id] = 2
-        for i in reversed(unk_idxs[1:]):
-            del tokens[i]
-            del scores[i]
-            del toktypes[i]
-    else:
-        unk_id = len(tokens)
-        tokens.append("<unk>")
-        scores.append(-100.0)
-        toktypes.append(2)
-    def ensure_control(id_val, name):
-        if id_val is not None and id_val < len(tokens):
-            if tokens[id_val] == f"<{name}>" and toktypes[id_val] != 3:
-                toktypes[id_val] = 3
-    pad_id = get_field(reader, "tokenizer.ggml.padding_token_id", int)
-    bos_id = get_field(reader, "tokenizer.ggml.bos_token_id", int)
-    eos_id = get_field(reader, "tokenizer.ggml.eos_token_id", int)
-    ensure_control(pad_id, "pad")
-    ensure_control(bos_id, "bos")
-    ensure_control(eos_id, "eos")
-
-    def ensure_token(id_val, type_val, name):
-        nonlocal tokens, scores, toktypes
-        if id_val is not None and id_val >= len(tokens):
-            tokens = list(tokens) + [f"<{name}>"]
-            scores = list(scores) + [-100.0]
-            toktypes = list(toktypes) + [type_val]
-
-    ensure_token(pad_id, 0, "pad")
-    ensure_token(bos_id, 1, "bos")
-    ensure_token(eos_id, 2, "eos")
-
-    for idx, (token, score, toktype) in enumerate(zip(tokens, scores, toktypes)):
-        piece = spm.SentencePiece()
-        piece.piece = token
-        piece.score = score
-        piece.type = toktype
-        spm.pieces.append(piece)
-
-    spm.trainer_spec.byte_fallback = True
-    spm.trainer_spec.vocab_size = len(tokens)
-    spm.trainer_spec.max_sentence_length = 4096
-    if eos_id is not None:
-        spm.trainer_spec.eos_id = eos_id
-    if pad_id is not None:
-        spm.trainer_spec.pad_id = pad_id
-    if unk_id is not None:
-        spm.trainer_spec.unk_id = unk_id
-    if bos_id is not None:
-        spm.trainer_spec.bos_id = bos_id
-
-    import traceback
-    try:
-        vocab_size = len(spm.pieces)
-        print(f"[GGUF DEBUG] tokenizer vocab_size: {vocab_size}")
-        print(f"[GGUF DEBUG] token_embd.weight shape: {temb_shape}")
-        if temb_shape[0] < vocab_size:
-            print(f"[GGUF ERROR] token_embd.weight 行数 {temb_shape[0]} 小于 tokenizer vocab_size {vocab_size}！")
-            raise RuntimeError(f"token_embd.weight 行数 {temb_shape[0]} 小于 tokenizer vocab_size {vocab_size}！")
-        elif temb_shape[0] > vocab_size:
-            print(f"[GGUF ERROR] token_embd.weight 行数 {temb_shape[0]} 大于 tokenizer vocab_size {vocab_size}！")
-            raise RuntimeError(f"token_embd.weight 行数 {temb_shape[0]} 大于 tokenizer vocab_size {vocab_size}！")
-
-        special_ids = [("unk_id", unk_id), ("pad_id", pad_id), ("bos_id", bos_id), ("eos_id", eos_id)]
-        for name, tid in special_ids:
-            print(f"[GGUF DEBUG] {name}: {tid}")
-            if tid is None or not (0 <= tid < vocab_size):
-                print(f"[GGUF ERROR] {name}={tid} 不在合法范围 0, {vocab_size}！")
-                raise RuntimeError(f"{name}={tid} 不在合法范围 0, {vocab_size}！")
-    except Exception as e:
-        print("[GGUF DEBUG] 发生异常：", e)
-        traceback.print_exc()
-        raise
-
-    logging.info(f"Created tokenizer with vocab size of {len(spm.pieces)} (unk_id={unk_id}, pad_id={pad_id}, bos_id={bos_id}, eos_id={eos_id})")
+        proto_bytes = raw_proto_field.encode('latin1')
+        del reader
+        return torch.ByteTensor(list(proto_bytes))
     del reader
-    return torch.ByteTensor(list(spm.SerializeToString()))
+    raise NotImplementedError("No sentencepiece proto found in GGUF metadata!")
 
 def gguf_clip_loader(path):
     sd, arch = gguf_sd_loader(path, return_arch=True, is_text_model=True)
