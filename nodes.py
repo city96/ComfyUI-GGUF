@@ -76,8 +76,21 @@ class GGUFModelPatcher(comfy.model_patcher.ModelPatcher):
         # TODO: Find another way to not unload after patches
         return super().unpatch_model(device_to=device_to, unpatch_weights=unpatch_weights)
 
+
+    def pin_weight_to_device(self, key):
+        op_key = key.rsplit('.', 1)[0]
+        if self.named_modules_to_munmap is not None and op_key in self.named_modules_to_munmap:
+            # TODO: possible to OOM, find better way to detach
+            self.named_modules_to_munmap[op_key].to(self.load_device).to(self.offload_device)
+            del self.named_modules_to_munmap[op_key]
+        super().pin_weight_to_device(key)
+
     mmap_released = False
+
     def load(self, *args, force_patch_weights=False, **kwargs):
+        if not self.mmap_released:
+            self.named_modules_to_munmap = dict(self.model.named_modules())
+
         # always call `patch_weight_to_device` even for lowvram
         super().load(*args, force_patch_weights=True, **kwargs)
 
@@ -85,7 +98,7 @@ class GGUFModelPatcher(comfy.model_patcher.ModelPatcher):
         if not self.mmap_released:
             linked = []
             if kwargs.get("lowvram_model_memory", 0) > 0:
-                for n, m in self.model.named_modules():
+                for n, m in self.named_modules_to_munmap.items():
                     if hasattr(m, "weight"):
                         device = getattr(m.weight, "device", None)
                         if device == self.offload_device:
@@ -102,6 +115,7 @@ class GGUFModelPatcher(comfy.model_patcher.ModelPatcher):
                     # TODO: possible to OOM, find better way to detach
                     m.to(self.load_device).to(self.offload_device)
             self.mmap_released = True
+        self.named_modules_to_munmap = None
 
     def clone(self, *args, **kwargs):
         src_cls = self.__class__
