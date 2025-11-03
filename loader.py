@@ -10,7 +10,7 @@ from .ops import GGMLTensor
 from .dequant import is_quantized, dequantize_tensor
 
 IMG_ARCH_LIST = {"flux", "sd1", "sdxl", "sd3", "aura", "hidream", "cosmos", "ltxv", "hyvid", "wan", "lumina2", "qwen_image"}
-TXT_ARCH_LIST = {"t5", "t5encoder", "llama", "qwen2vl"}
+TXT_ARCH_LIST = {"t5", "t5encoder", "llama", "qwen2vl", "clip"}
 VIS_TYPE_LIST = {"clip-vision"}
 
 def get_orig_shape(reader, tensor_name):
@@ -351,3 +351,4 @@ def gguf_clip_loader(path):
     else:
         pass
     return sd
+
