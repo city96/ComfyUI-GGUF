@@ -11,7 +11,7 @@ from .dequant import is_quantized, dequantize_tensor
 
 IMG_ARCH_LIST = {"flux", "sd1", "sdxl", "sd3", "aura", "hidream", "cosmos", "ltxv", "hyvid", "wan", "lumina2", "qwen_image"}
 TXT_ARCH_LIST = {"t5", "t5encoder", "llama", "qwen2vl"}
-VIS_TYPE_LIST = {"clip-vision"}
+VIS_TYPE_LIST = {"clip-vision", "mmproj"}
 
 def get_orig_shape(reader, tensor_name):
     field_key = f"comfy.gguf.orig_shape.{tensor_name}"
