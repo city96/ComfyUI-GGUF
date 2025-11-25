@@ -153,7 +153,7 @@ class GGMLLayer(torch.nn.Module):
         # Take into account space required for dequantizing the largest tensor
         if self.largest_layer:
             shape = getattr(self.weight, "tensor_shape", self.weight.shape)
-            dtype = self.dequant_dtype or torch.float16
+            dtype = self.dequant_dtype if self.dequant_dtype and self.dequant_dtype != "target" else torch.float16
             temp = torch.empty(*shape, device=torch.device("meta"), dtype=dtype)
             destination[prefix + "temp.weight"] = temp
 
