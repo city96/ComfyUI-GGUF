@@ -150,18 +150,7 @@ class UnetLoaderGGUF:
 
     def load_unet(self, unet_name, dequant_dtype=None, patch_dtype=None, patch_on_device=None, optimize="none"):
         dequantize_function = dequantize_handlers = None
-        if optimize == "compile":
-            compile_opts={}
-            try:
-                dequantize_function = torch.compile(dequant.dequantize, **compile_opts)
-                dequantize_handlers = {
-                    k: torch.compile(v, **compile_opts)
-                    for k, v in dequant.dequantize_functions.items()
-                }
-            except Exception as exc:
-                dequantize_function = dequantize_handlers = None
-                print(f"GGUF: Failed to compile dequant functions: {exc}")
-        elif optimize == "triton":
+        if optimize == "triton":
             dequantize_handlers = dequant.dequantize_functions | dequant.triton_dequantize_functions
 
         if dequant_dtype == "default":
@@ -182,7 +171,7 @@ class UnetLoaderGGUF:
             dequantize_handlers = dequantize_handlers,
         )
         print(f"\nGGUF: Using config {config}")
-        ops = GGMLOps(ggufconfig=config)
+        ops = GGMLOps(gguf_config=config)
 
         # init model
         unet_path = folder_paths.get_full_path("unet", unet_name)
@@ -221,7 +210,7 @@ class UnetLoaderGGUFAdvanced(UnetLoaderGGUF):
                 ),
                 "patch_on_device": ("BOOLEAN", {"default": False}),
                 "optimize": (
-                    ("none", "compile", "triton"),
+                    ("none", "triton"),
                     {
                         "default": "none",
                         "tooltip": f"Triton status: {'available' if HAVE_TRITON else 'unavailable'}\nTriton kernels: {pretty_triton_quants}",

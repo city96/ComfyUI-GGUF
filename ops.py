@@ -151,7 +151,7 @@ class GGMLLayer(torch.nn.Module):
 
         # Take into account space required for dequantizing the largest tensor
         if self.largest_layer:
-            dequant_dtype = self.ggufconfig.dequant_dtype
+            dequant_dtype = self.gguf_config.dequant_dtype
             shape = getattr(self.weight, "tensor_shape", self.weight.shape)
             dtype = self.dequant_dtype if self.dequant_dtype and self.dequant_dtype != "target" else torch.float16
             temp = torch.empty(*shape, device=torch.device("meta"), dtype=dtype)
@@ -164,36 +164,34 @@ class GGMLLayer(torch.nn.Module):
             destination[prefix + "bias"] = self.get_weight(self.bias)
 
     def get_weight(self, tensor, dtype):
-        if tensor is None:
-            return
-        patch_dtype = self.ggufconfig.patch_dtype
+            if tensor is None:
+                return
 
-        # consolidate and load patches to GPU in async
-        patch_list = []
-        device = tensor.device
+            # consolidate and load patches to GPU in async
+            patch_list = []
+            device = tensor.device
+            for patches, key in getattr(tensor, "patches", []):
+                patch_list += move_patch_to_device(patches, device)
 
-        key = patches = None
-        for patches, key in getattr(tensor, "patches", []):
-            patch_list += move_patch_to_device(patches, device)
+            # dequantize tensor while patches load
+            weight = dequantize_tensor(tensor, dtype, self.gguf_config)
 
-        # dequantize tensor while patches load
-        weight = dequantize_tensor(tensor, dtype, self.ggufconfig)
+            # prevent propagating custom tensor class
+            if isinstance(weight, GGMLTensor):
+                weight = torch.Tensor(weight)
 
-        # prevent propagating custom tensor class
-        if isinstance(weight, GGMLTensor):
-            weight = torch.Tensor(weight)
+            patch_dtype = self.gguf_config.patch_dtype
 
-        if key is None:
-            # Patch list was empty.
+            # apply patches
+            if len(patch_list) > 0:
+                if patch_dtype is None:
+                    weight = comfy.lora.calculate_weight(patch_list, weight, key)
+                else:
+                    # for testing, may degrade image quality
+                    if patch_dtype == "target":
+                        patch_dtype = dtype
+                    weight = comfy.lora.calculate_weight(patch_list, weight, key, patch_dtype)
             return weight
-
-        # apply patches
-        if patch_dtype is None:
-            return comfy.lora.calculate_weight(patch_list, weight, key)
-
-        # for testing, may degrade image quality
-        patch_dtype = dtype if patch_dtype == "target" else patch_dtype
-        return comfy.lora.calculate_weight(patch_list, weight, key, patch_dtype)
 
     @torch_compiler_disable()
     def cast_bias_weight(s, input=None, dtype=None, device=None, bias_dtype=None):
@@ -237,16 +235,16 @@ class GGMLOps(comfy.ops.manual_cast):
 
     _MODULE_NAMES = ("Linear", "Conv2d", "Embedding", "LayerNorm", "GroupNorm")
 
-    def __init__(self, *args, ggufconfig: Optional[GGUFConfig]=None, **kwargs):
+    def __init__(self, *args, gguf_config: Optional[GGUFConfig]=None, **kwargs):
         super().__init__(*args, **kwargs)
-        linear_config = ggufconfig or DEFAULT_CONFIG
+        linear_config = gguf_config or DEFAULT_CONFIG
         # Ignore patch_dtype and dequant_dtype for non-Linear layers.
         other_config = linear_config._replace(patch_dtype=None, dequant_dtype=None)
-        self.ggufconfig = linear_config
+        self.gguf_config = linear_config
         for module_name in self._MODULE_NAMES:
             module = getattr(self.__class__, module_name)
             curr_config = linear_config if module_name == "Linear" else other_config
-            setattr(self, module_name, type(module_name, (module,), {"ggufconfig": curr_config}))
+            setattr(self, module_name, type(module_name, (module,), {"gguf_config": curr_config}))
 
 
     class Linear(GGMLLayer, comfy.ops.manual_cast.Linear):
