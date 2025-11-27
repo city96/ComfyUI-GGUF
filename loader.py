@@ -213,7 +213,7 @@ def strip_quant_suffix(name):
         name = name[:match.start()]
     return name
 
-def gguf_mmproj_loader(path):
+def gguf_mmproj_loader(path, mmproj_path):
     # Reverse version of Qwen2VLVisionModel.modify_tensors
     logging.info("Attenpting to find mmproj file for text encoder...")
 
@@ -222,27 +222,10 @@ def gguf_mmproj_loader(path):
     tenc = os.path.splitext(tenc_fname)[0].lower()
     tenc = strip_quant_suffix(tenc)
 
-    # try and find matching mmproj
-    target = []
-    root = os.path.dirname(path)
-    for fname in os.listdir(root):
-        name, ext = os.path.splitext(fname)
-        if ext.lower() != ".gguf":
-            continue
-        if "mmproj" not in name.lower():
-            continue
-        if tenc in name.lower():
-            target.append(fname)
-
-    if len(target) == 0:
+    if mmproj_path is None or not os.path.exists(mmproj_path):
         logging.error(f"Error: Can't find mmproj file for '{tenc_fname}' (matching:'{tenc}')! Qwen-Image-Edit will be broken!")
         return {}
-    if len(target) > 1:
-        logging.error(f"Ambiguous mmproj for text encoder '{tenc_fname}', will use first match.")
-
-    logging.info(f"Using mmproj '{target[0]}' for text encoder '{tenc_fname}'.")
-    target = os.path.join(root, target[0])
-    vsd = gguf_sd_loader(target, is_text_model=True)
+    vsd = gguf_sd_loader(mmproj_path, is_text_model=True)
 
     # concat 4D to 5D
     if "v.patch_embd.weight.1" in vsd:
@@ -327,7 +310,7 @@ def gguf_tokenizer_loader(path, temb_shape):
     del reader
     return torch.ByteTensor(list(spm.SerializeToString()))
 
-def gguf_clip_loader(path):
+def gguf_clip_loader(path, **kwargs):
     sd, arch = gguf_sd_loader(path, return_arch=True, is_text_model=True)
     if arch in {"t5", "t5encoder"}:
         temb_key = "token_embd.weight"
@@ -349,7 +332,8 @@ def gguf_clip_loader(path):
         if arch == "llama":
             sd = llama_permute(sd, 32, 8) # L3
         if arch == "qwen2vl":
-            vsd = gguf_mmproj_loader(path)
+            mmproj_path = kwargs.get("mmproj_path", None)
+            vsd = gguf_mmproj_loader(path, mmproj_path)
             sd.update(vsd)
     else:
         pass
