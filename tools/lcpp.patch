@@ -126,7 +126,7 @@ index 24e1f1f0..ee68edfd 100644
      // get hparams kv
      ml.get_key(LLM_KV_VOCAB_SIZE, hparams.n_vocab, false) || ml.get_arr_n(LLM_KV_TOKENIZER_LIST, hparams.n_vocab);
  
-@@ -18016,6 +18072,158 @@ static void llama_tensor_dequantize_internal(
+@@ -18016,6 +18072,159 @@ static void llama_tensor_dequantize_internal(
      workers.clear();
  }
  
@@ -237,14 +237,15 @@ index 24e1f1f0..ee68edfd 100644
 +            (name.find("transformer_blocks.0.") != std::string::npos) ||
 +            (name.find("transformer_blocks.59.") != std::string::npos) // this should be dynamic
 +        ) {
-+            if (ftype == LLAMA_FTYPE_MOSTLY_Q3_K_S || ftype == LLAMA_FTYPE_MOSTLY_Q2_K) {
-+                new_type = GGML_TYPE_Q4_K;
-+            }
-+            else if (ftype == LLAMA_FTYPE_MOSTLY_Q3_K_M || ftype == LLAMA_FTYPE_MOSTLY_Q3_K_L) {
-+                new_type = GGML_TYPE_Q4_K;
-+            }
-+            else if (ftype == LLAMA_FTYPE_MOSTLY_Q4_K_M) {
-+                new_type = GGML_TYPE_Q5_K;
++            if (ftype == LLAMA_FTYPE_MOSTLY_Q2_K ||
++                ftype == LLAMA_FTYPE_MOSTLY_Q3_K_S ||
++                ftype == LLAMA_FTYPE_MOSTLY_Q3_K_M ||
++                ftype == LLAMA_FTYPE_MOSTLY_Q3_K_L ||
++                ftype == LLAMA_FTYPE_MOSTLY_Q4_0 ||
++                ftype == LLAMA_FTYPE_MOSTLY_Q4_1 ||
++                ftype == LLAMA_FTYPE_MOSTLY_Q4_K_S ||
++                ftype == LLAMA_FTYPE_MOSTLY_Q4_K_M) {
++                new_type = GGML_TYPE_Q5_K;  // Minimum Q5_K for low quants
 +            }
 +            else if (ftype == LLAMA_FTYPE_MOSTLY_Q5_K_M) {
 +                new_type = GGML_TYPE_Q6_K;
