@@ -149,6 +149,11 @@ class ModelLumina2(ModelTemplate):
     keys_detect = [
         ("cap_embedder.1.weight", "context_refiner.0.attention.qkv.weight")
     ]
+    keys_hiprec = [
+        # Z-Image specific
+        "x_pad_token",
+        "cap_pad_token",
+    ]
 
 # The architectures are checked in order and the first successful match terminates the search.
 arch_list = [

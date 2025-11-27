@@ -39,7 +39,7 @@ index b16c462f..6d1568f1 100644
      const int idx = gguf_find_tensor(ctx, name);
      if (idx < 0) {
 diff --git a/src/llama.cpp b/src/llama.cpp
-index 24e1f1f0..78b74deb 100644
+index 24e1f1f0..ee68edfd 100644
 --- a/src/llama.cpp
 +++ b/src/llama.cpp
 @@ -205,6 +205,18 @@ enum llm_arch {
@@ -296,7 +296,7 @@ index 24e1f1f0..78b74deb 100644
      }
  
      size_t total_size_org = 0;
-@@ -18547,6 +18757,57 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
+@@ -18547,6 +18757,71 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
              ctx_outs[i_split] = gguf_init_empty();
          }
          gguf_add_tensor(ctx_outs[i_split], tensor);
@@ -321,6 +321,20 @@ index 24e1f1f0..78b74deb 100644
 +                const int n_dim = 3;
 +                gguf_set_tensor_ndim(ctx_outs[i_split], "register_tokens", n_dim);
 +                LLAMA_LOG_INFO("\n%s: Correcting register_tokens shape for AuraFlow: [key:%s]\n", __func__, tensor->name);
++            }
++        }
++        // not used for actual lumina, Z-Image specific
++        if (model.arch == LLM_ARCH_LUMINA2) {
++            const std::string name = ggml_get_name(tensor);
++            if (name == "x_pad_token" && tensor->ne[1] == 1) {
++                const int n_dim = 2;
++                gguf_set_tensor_ndim(ctx_outs[i_split], "x_pad_token", n_dim);
++                LLAMA_LOG_INFO("\n%s: Correcting x_pad_token shape for Z-Image: [key:%s]\n", __func__, tensor->name);
++            }
++            if (name == "cap_pad_token" && tensor->ne[1] == 1) {
++                const int n_dim = 2;
++                gguf_set_tensor_ndim(ctx_outs[i_split], "cap_pad_token", n_dim);
++                LLAMA_LOG_INFO("\n%s: Correcting cap_pad_token shape for Z-Image: [key:%s]\n", __func__, tensor->name);
 +            }
 +        }
 +        // conv3d fails due to max dims - unsure what to do here as we never even reach this check
@@ -354,7 +368,7 @@ index 24e1f1f0..78b74deb 100644
      }
  
      // Set split info if needed
-@@ -18647,6 +18908,127 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
+@@ -18647,6 +18922,131 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
          // do not quantize relative position bias (T5)
          quantize &= name.find("attn_rel_b.weight") == std::string::npos;
  
@@ -465,6 +479,10 @@ index 24e1f1f0..78b74deb 100644
 +            quantize &= name.find("cap_embedder.") == std::string::npos;
 +            quantize &= name.find("context_refiner.") == std::string::npos;
 +            quantize &= name.find("noise_refiner.") == std::string::npos;
++            // z-image
++            quantize &= name.find("x_pad_token.") == std::string::npos;
++            quantize &= name.find("cap_pad_token.") == std::string::npos;
++
 +        }
 +        if (model.arch == LLM_ARCH_QWEN_IMAGE) {
 +            image_model = true;
@@ -482,7 +500,7 @@ index 24e1f1f0..78b74deb 100644
          enum ggml_type new_type;
          void * new_data;
          size_t new_size;
-@@ -18655,6 +19037,9 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
+@@ -18655,6 +19055,9 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
              new_type = default_type;
  
              // get more optimal quantization type based on the tensor shape, layer, etc.
@@ -492,7 +510,7 @@ index 24e1f1f0..78b74deb 100644
              if (!params->pure && ggml_is_quantized(default_type)) {
                  new_type = llama_tensor_get_type(qs, new_type, tensor, ftype);
              }
-@@ -18664,6 +19049,7 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
+@@ -18664,6 +19067,7 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
              if (params->output_tensor_type < GGML_TYPE_COUNT && strcmp(tensor->name, "output.weight") == 0) {
                  new_type = params->output_tensor_type;
              }
