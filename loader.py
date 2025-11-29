@@ -74,9 +74,9 @@ def gguf_sd_loader(path, handle_prefix="model.diffusion_model.", return_arch=Fal
     compat = None
     arch_str = get_field(reader, "general.architecture", str)
     type_str = get_field(reader, "general.type", str)
-    if arch_str in [None, "pig"]:
+    if arch_str in [None, "pig", "cow"]:
         if is_text_model:
-            raise ValueError(f"This text model is incompatible with llama.cpp!\nConsider using the safetensors version\n({path})")
+            raise ValueError(f"This gguf file is incompatible with llama.cpp!\nConsider using safetensors or a compatible gguf file\n({path})")
         compat = "sd.cpp" if arch_str is None else arch_str
         # import here to avoid changes to convert.py breaking regular models
         from .tools.convert import detect_arch
