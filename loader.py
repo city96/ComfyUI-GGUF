@@ -327,6 +327,49 @@ def gguf_tokenizer_loader(path, temb_shape):
     del reader
     return torch.ByteTensor(list(spm.SerializeToString()))
 
+def gguf_tekken_tokenizer_loader(path, temb_shape):
+    # convert ggml (hf) tokenizer metadata to tekken/comfy data
+    logging.info("Attempting to recreate tekken tokenizer from GGUF file metadata...")
+    import json
+    import base64
+    from transformers.convert_slow_tokenizer import bytes_to_unicode
+
+    reader = gguf.GGUFReader(path)
+
+    model_str = get_field(reader, "tokenizer.ggml.model", str)
+    if model_str == "gpt2":
+        if temb_shape == (131072, 5120): # probably Mistral
+            data = {
+                "config": {"num_vocab_tokens": 150000, "default_vocab_size": 131072},
+                "vocab": [],
+                "special_tokens": [],
+            }
+        else:
+            raise NotImplementedError("Unknown model, can't set tokenizer!")
+    else:
+        raise NotImplementedError("Unknown model, can't set tokenizer!")
+
+    tokens = get_list_field(reader, "tokenizer.ggml.tokens", str)
+    toktypes = get_list_field(reader, "tokenizer.ggml.token_type", int)
+
+    decoder = {v: k for k, v in bytes_to_unicode().items()}
+    for idx, (token, toktype) in enumerate(zip(tokens, toktypes)):
+        if toktype == 3:
+            data["special_tokens"].append(
+                {'rank': idx, 'token_str': token, 'is_control': True}
+            )
+        else:
+            tok = bytes([decoder[char] for char in token])
+            data["vocab"].append({
+                "rank": len(data["vocab"]),
+                "token_bytes": base64.b64encode(tok).decode("ascii"),
+                "token_str": tok.decode("utf-8", errors="replace") # ?
+            })
+
+    logging.info(f"Created tekken tokenizer with vocab size of {len(data['vocab'])} (+{len(data['special_tokens'])})")
+    del reader
+    return torch.ByteTensor(list(json.dumps(data).encode('utf-8')))
+
 def gguf_clip_loader(path):
     sd, arch = gguf_sd_loader(path, return_arch=True, is_text_model=True)
     if arch in {"t5", "t5encoder"}:
@@ -342,12 +385,15 @@ def gguf_clip_loader(path):
         # TODO: pass model_options["vocab_size"] to loader somehow
         temb_key = "token_embd.weight"
         if temb_key in sd and sd[temb_key].shape[0] >= (64 * 1024):
+            if arch == "llama" and sd[temb_key].shape == (131072, 5120):
+                # non-standard Comfy-Org tokenizer
+                sd["tekken_model"] = gguf_tekken_tokenizer_loader(path, sd[temb_key].shape)
             # See note above for T5.
             logging.warning(f"Dequantizing {temb_key} to prevent runtime OOM.")
             sd[temb_key] = dequantize_tensor(sd[temb_key], dtype=torch.float16)
         sd = sd_map_replace(sd, LLAMA_SD_MAP)
         if arch == "llama":
-            sd = llama_permute(sd, 32, 8) # L3
+            sd = llama_permute(sd, 32, 8) # L3 / Mistral
         if arch == "qwen2vl":
             vsd = gguf_mmproj_loader(path)
             sd.update(vsd)
