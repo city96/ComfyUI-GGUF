@@ -39,10 +39,10 @@ index b16c462f..6d1568f1 100644
      const int idx = gguf_find_tensor(ctx, name);
      if (idx < 0) {
 diff --git a/src/llama.cpp b/src/llama.cpp
-index 24e1f1f0..25db4c69 100644
+index 24e1f1f0..ee68edfd 100644
 --- a/src/llama.cpp
 +++ b/src/llama.cpp
-@@ -205,6 +205,17 @@ enum llm_arch {
+@@ -205,6 +205,18 @@ enum llm_arch {
      LLM_ARCH_GRANITE,
      LLM_ARCH_GRANITE_MOE,
      LLM_ARCH_CHAMELEON,
@@ -57,10 +57,11 @@ index 24e1f1f0..25db4c69 100644
 +    LLM_ARCH_HIDREAM,
 +    LLM_ARCH_COSMOS,
 +    LLM_ARCH_LUMINA2,
++    LLM_ARCH_QWEN_IMAGE,
      LLM_ARCH_UNKNOWN,
  };
  
-@@ -258,6 +269,17 @@ static const std::map<llm_arch, const char *> LLM_ARCH_NAMES = {
+@@ -258,6 +270,18 @@ static const std::map<llm_arch, const char *> LLM_ARCH_NAMES = {
      { LLM_ARCH_GRANITE,         "granite"      },
      { LLM_ARCH_GRANITE_MOE,     "granitemoe"   },
      { LLM_ARCH_CHAMELEON,       "chameleon"    },
@@ -75,28 +76,30 @@ index 24e1f1f0..25db4c69 100644
 +    { LLM_ARCH_HIDREAM,         "hidream"      },
 +    { LLM_ARCH_COSMOS,          "cosmos"       },
 +    { LLM_ARCH_LUMINA2,         "lumina2"      },
++    { LLM_ARCH_QWEN_IMAGE,      "qwen_image"   },
      { LLM_ARCH_UNKNOWN,         "(unknown)"    },
  };
  
-@@ -1531,6 +1553,17 @@ static const std::map<llm_arch, std::map<llm_tensor, const char *>> LLM_TENSOR_N
+@@ -1531,6 +1555,18 @@ static const std::map<llm_arch, std::map<llm_tensor, const char *>> LLM_TENSOR_N
              { LLM_TENSOR_ATTN_K_NORM,     "blk.%d.attn_k_norm" },
          },
      },
-+    { LLM_ARCH_FLUX,    {}},
-+    { LLM_ARCH_SD1,     {}},
-+    { LLM_ARCH_SDXL,    {}},
-+    { LLM_ARCH_SD3,     {}},
-+    { LLM_ARCH_AURA,    {}},
-+    { LLM_ARCH_LTXV,    {}},
-+    { LLM_ARCH_HYVID,   {}},
-+    { LLM_ARCH_WAN,     {}},
-+    { LLM_ARCH_HIDREAM, {}},
-+    { LLM_ARCH_COSMOS,  {}},
-+    { LLM_ARCH_LUMINA2, {}},
++    { LLM_ARCH_FLUX,       {}},
++    { LLM_ARCH_SD1,        {}},
++    { LLM_ARCH_SDXL,       {}},
++    { LLM_ARCH_SD3,        {}},
++    { LLM_ARCH_AURA,       {}},
++    { LLM_ARCH_LTXV,       {}},
++    { LLM_ARCH_HYVID,      {}},
++    { LLM_ARCH_WAN,        {}},
++    { LLM_ARCH_HIDREAM,    {}},
++    { LLM_ARCH_COSMOS,     {}},
++    { LLM_ARCH_LUMINA2,    {}},
++    { LLM_ARCH_QWEN_IMAGE, {}},
      {
          LLM_ARCH_UNKNOWN,
          {
-@@ -5403,6 +5436,25 @@ static void llm_load_hparams(
+@@ -5403,6 +5439,26 @@ static void llm_load_hparams(
      // get general kv
      ml.get_key(LLM_KV_GENERAL_NAME, model.name, false);
  
@@ -113,6 +116,7 @@ index 24e1f1f0..25db4c69 100644
 +        case LLM_ARCH_HIDREAM:
 +        case LLM_ARCH_COSMOS:
 +        case LLM_ARCH_LUMINA2:
++        case LLM_ARCH_QWEN_IMAGE:
 +            model.ftype = ml.ftype;
 +            return;
 +        default:
@@ -122,7 +126,7 @@ index 24e1f1f0..25db4c69 100644
      // get hparams kv
      ml.get_key(LLM_KV_VOCAB_SIZE, hparams.n_vocab, false) || ml.get_arr_n(LLM_KV_TOKENIZER_LIST, hparams.n_vocab);
  
-@@ -18016,6 +18068,134 @@ static void llama_tensor_dequantize_internal(
+@@ -18016,6 +18072,158 @@ static void llama_tensor_dequantize_internal(
      workers.clear();
  }
  
@@ -158,6 +162,7 @@ index 24e1f1f0..25db4c69 100644
 +            (name.find(".v.weight") != std::string::npos) ||
 +            (name.find(".attn.w1v.weight") != std::string::npos) ||
 +            (name.find(".attn.w2v.weight") != std::string::npos) ||
++            (name.find(".add_v_proj.weight") != std::string::npos) ||
 +            (name.find("_attn.v_proj.weight") != std::string::npos)
 +        ){
 +            if (ftype == LLAMA_FTYPE_MOSTLY_Q2_K) {
@@ -197,7 +202,9 @@ index 24e1f1f0..25db4c69 100644
 +            (name.find(".ff.net.2.weight") != std::string::npos) ||
 +            (name.find(".mlp.layer2.weight") != std::string::npos) ||
 +            (name.find(".adaln_modulation_mlp.2.weight") != std::string::npos) ||
-+            (name.find(".feed_forward.w2.weight") != std::string::npos)
++            (name.find(".feed_forward.w2.weight") != std::string::npos) ||
++            (name.find(".img_mlp.net.2.weight") != std::string::npos) ||
++            (name.find(".txt_mlp.net.2.weight") != std::string::npos)
 +        ) {
 +            // TODO: add back `layer_info` with some model specific logic + logic further down
 +            if (ftype == LLAMA_FTYPE_MOSTLY_Q3_K_M) {
@@ -222,6 +229,27 @@ index 24e1f1f0..25db4c69 100644
 +                new_type = GGML_TYPE_Q5_1;
 +            }
 +            ++qs.i_ffn_down;
++    }
++
++    // first/last block high precision test
++    if (arch == LLM_ARCH_QWEN_IMAGE){
++        if (
++            (name.find("transformer_blocks.0.") != std::string::npos) ||
++            (name.find("transformer_blocks.59.") != std::string::npos) // this should be dynamic
++        ) {
++            if (ftype == LLAMA_FTYPE_MOSTLY_Q3_K_S || ftype == LLAMA_FTYPE_MOSTLY_Q2_K) {
++                new_type = GGML_TYPE_Q4_K;
++            }
++            else if (ftype == LLAMA_FTYPE_MOSTLY_Q3_K_M || ftype == LLAMA_FTYPE_MOSTLY_Q3_K_L) {
++                new_type = GGML_TYPE_Q4_K;
++            }
++            else if (ftype == LLAMA_FTYPE_MOSTLY_Q4_K_M) {
++                new_type = GGML_TYPE_Q5_K;
++            }
++            else if (ftype == LLAMA_FTYPE_MOSTLY_Q5_K_M) {
++                new_type = GGML_TYPE_Q6_K;
++            }
++        }
 +    }
 +
 +    // Sanity check for row shape
@@ -257,7 +285,7 @@ index 24e1f1f0..25db4c69 100644
  static ggml_type llama_tensor_get_type(quantize_state_internal & qs, ggml_type new_type, const ggml_tensor * tensor, llama_ftype ftype) {
      const std::string name = ggml_get_name(tensor);
  
-@@ -18513,7 +18693,9 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
+@@ -18513,7 +18721,9 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
          if (llama_model_has_encoder(&model)) {
              n_attn_layer *= 3;
          }
@@ -268,7 +296,7 @@ index 24e1f1f0..25db4c69 100644
      }
  
      size_t total_size_org = 0;
-@@ -18547,6 +18729,51 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
+@@ -18547,6 +18757,71 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
              ctx_outs[i_split] = gguf_init_empty();
          }
          gguf_add_tensor(ctx_outs[i_split], tensor);
@@ -295,6 +323,20 @@ index 24e1f1f0..25db4c69 100644
 +                LLAMA_LOG_INFO("\n%s: Correcting register_tokens shape for AuraFlow: [key:%s]\n", __func__, tensor->name);
 +            }
 +        }
++        // not used for actual lumina, Z-Image specific
++        if (model.arch == LLM_ARCH_LUMINA2) {
++            const std::string name = ggml_get_name(tensor);
++            if (name == "x_pad_token" && tensor->ne[1] == 1) {
++                const int n_dim = 2;
++                gguf_set_tensor_ndim(ctx_outs[i_split], "x_pad_token", n_dim);
++                LLAMA_LOG_INFO("\n%s: Correcting x_pad_token shape for Z-Image: [key:%s]\n", __func__, tensor->name);
++            }
++            if (name == "cap_pad_token" && tensor->ne[1] == 1) {
++                const int n_dim = 2;
++                gguf_set_tensor_ndim(ctx_outs[i_split], "cap_pad_token", n_dim);
++                LLAMA_LOG_INFO("\n%s: Correcting cap_pad_token shape for Z-Image: [key:%s]\n", __func__, tensor->name);
++            }
++        }
 +        // conv3d fails due to max dims - unsure what to do here as we never even reach this check
 +        if (model.arch == LLM_ARCH_HYVID) {
 +            const std::string name = ggml_get_name(tensor);
@@ -316,11 +358,17 @@ index 24e1f1f0..25db4c69 100644
 +                gguf_set_tensor_ndim(ctx_outs[i_split], tensor->name, n_dim);
 +                LLAMA_LOG_INFO("\n%s: Correcting shape for Wan FLF2V: [key:%s]\n", __func__, tensor->name);
 +            }
++            // S2V model only
++            if (name == "casual_audio_encoder.weights" || name == "casual_audio_encoder.encoder.padding_tokens") {
++                const int n_dim = 4;
++                gguf_set_tensor_ndim(ctx_outs[i_split], tensor->name, n_dim);
++                LLAMA_LOG_INFO("\n%s: Correcting shape for Wan S2V: [key:%s]\n", __func__, tensor->name);
++            }
 +        }
      }
  
      // Set split info if needed
-@@ -18647,6 +18874,110 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
+@@ -18647,6 +18922,131 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
          // do not quantize relative position bias (T5)
          quantize &= name.find("attn_rel_b.weight") == std::string::npos;
  
@@ -334,6 +382,9 @@ index 24e1f1f0..25db4c69 100644
 +            quantize &= name.find("vector_in.") == std::string::npos;
 +            quantize &= name.find("guidance_in.") == std::string::npos;
 +            quantize &= name.find("final_layer.") == std::string::npos;
++            // flux2
++            quantize &= name.find("single_stream_modulation.") == std::string::npos;
++            quantize &= name.find("double_stream_modulation_") == std::string::npos;
 +        }
 +        if (model.arch == LLM_ARCH_SD1 || model.arch == LLM_ARCH_SDXL) {
 +            image_model = true;
@@ -395,6 +446,12 @@ index 24e1f1f0..25db4c69 100644
 +            quantize &= name.find("time_embedding.") == std::string::npos;
 +            quantize &= name.find("img_emb.") == std::string::npos;
 +            quantize &= name.find("head.") == std::string::npos;
++            // S2V
++            quantize &= name.find("cond_encoder.") == std::string::npos;
++            quantize &= name.find("frame_packer.") == std::string::npos;
++            quantize &= name.find("audio_injector.") == std::string::npos;
++            quantize &= name.find("casual_audio_encoder.") == std::string::npos;
++            quantize &= name.find("trainable_cond_mask.") == std::string::npos;
 +        }
 +        if (model.arch == LLM_ARCH_HIDREAM) {
 +            image_model = true;
@@ -422,6 +479,18 @@ index 24e1f1f0..25db4c69 100644
 +            quantize &= name.find("cap_embedder.") == std::string::npos;
 +            quantize &= name.find("context_refiner.") == std::string::npos;
 +            quantize &= name.find("noise_refiner.") == std::string::npos;
++            // z-image
++            quantize &= name.find("x_pad_token.") == std::string::npos;
++            quantize &= name.find("cap_pad_token.") == std::string::npos;
++
++        }
++        if (model.arch == LLM_ARCH_QWEN_IMAGE) {
++            image_model = true;
++            quantize &= name.find("img_in.") == std::string::npos;
++            quantize &= name.find("txt_in.") == std::string::npos;
++            quantize &= name.find("time_text_embed.") == std::string::npos;
++            quantize &= name.find("proj_out.") == std::string::npos;
++            quantize &= name.find("norm_out.") == std::string::npos;
 +        }
 +        // ignore 3D/4D tensors for image models as the code was never meant to handle these
 +        if (image_model) {
@@ -431,7 +500,7 @@ index 24e1f1f0..25db4c69 100644
          enum ggml_type new_type;
          void * new_data;
          size_t new_size;
-@@ -18655,6 +18986,9 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
+@@ -18655,6 +19055,9 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
              new_type = default_type;
  
              // get more optimal quantization type based on the tensor shape, layer, etc.
@@ -441,7 +510,7 @@ index 24e1f1f0..25db4c69 100644
              if (!params->pure && ggml_is_quantized(default_type)) {
                  new_type = llama_tensor_get_type(qs, new_type, tensor, ftype);
              }
-@@ -18664,6 +18998,7 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
+@@ -18664,6 +19067,7 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
              if (params->output_tensor_type < GGML_TYPE_COUNT && strcmp(tensor->name, "output.weight") == 0) {
                  new_type = params->output_tensor_type;
              }
