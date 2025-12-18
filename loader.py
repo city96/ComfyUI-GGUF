@@ -120,7 +120,7 @@ def gguf_sd_loader(path, handle_prefix="model.diffusion_model.", return_arch=Fal
         state_dict[sd_key] = GGMLTensor(torch_tensor, tensor_type=tensor.tensor_type, tensor_shape=shape)
 
         # 1D tensors shouldn't be quantized, this is a fix for BF16
-        if len(shape) <= 1 and is_quantized(state_dict[sd_key]):
+        if len(shape) <= 1 and tensor.tensor_type == gguf.GGMLQuantizationType.BF16:
             state_dict[sd_key] = dequantize_tensor(state_dict[sd_key], dtype=torch.float32)
 
         # keep track of loaded tensor types
