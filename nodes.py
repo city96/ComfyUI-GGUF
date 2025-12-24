@@ -198,6 +198,7 @@ class CLIPLoaderGGUF:
             "required": {
                 "clip_name": (s.get_filename_list(),),
                 "type": base["required"]["type"],
+                "mmproj_name": (["none"] + s.get_mmproj_list(),),
             }
         }
 
@@ -213,11 +214,25 @@ class CLIPLoaderGGUF:
         files += folder_paths.get_filename_list("clip_gguf")
         return sorted(files)
 
-    def load_data(self, ckpt_paths):
+    @classmethod
+    def get_mmproj_list(s):
+        files = []
+        for x in folder_paths.get_filename_list("clip"):
+            if "mmproj" in x.lower():
+                files.append(x)
+        for x in folder_paths.get_filename_list("clip_gguf"):
+            if "mmproj" in x.lower():
+                files.append(x)
+        return sorted(files)
+
+    def load_data(self, ckpt_paths, mmproj_paths=None):
+        if mmproj_paths is None:
+            mmproj_paths = [None] * len(ckpt_paths)
+
         clip_data = []
-        for p in ckpt_paths:
+        for p, mp in zip(ckpt_paths, mmproj_paths):
             if p.endswith(".gguf"):
-                sd = gguf_clip_loader(p)
+                sd = gguf_clip_loader(p, mmproj_path=mp)
             else:
                 sd = comfy.utils.load_torch_file(p, safe_load=True)
                 if "scaled_fp8" in sd: # NOTE: Scaled FP8 would require different custom ops, but only one can be active
@@ -238,10 +253,12 @@ class CLIPLoaderGGUF:
         clip.patcher = GGUFModelPatcher.clone(clip.patcher)
         return clip
 
-    def load_clip(self, clip_name, type="stable_diffusion"):
+    def load_clip(self, clip_name, type="stable_diffusion", mmproj_name="none"):
+        if mmproj_name == "none": mmproj_name = None
         clip_path = folder_paths.get_full_path("clip", clip_name)
+        mmproj_path = folder_paths.get_full_path("clip", mmproj_name) if mmproj_name is not None else None
         clip_type = getattr(comfy.sd.CLIPType, type.upper(), comfy.sd.CLIPType.STABLE_DIFFUSION)
-        return (self.load_patcher([clip_path], clip_type, self.load_data([clip_path])),)
+        return (self.load_patcher([clip_path], clip_type, self.load_data([clip_path], mmproj_paths=[mmproj_path])),)
 
 class DualCLIPLoaderGGUF(CLIPLoaderGGUF):
     @classmethod
@@ -251,19 +268,26 @@ class DualCLIPLoaderGGUF(CLIPLoaderGGUF):
         return {
             "required": {
                 "clip_name1": file_options,
+                "mmproj_name1": (["none"] + s.get_mmproj_list(),),
                 "clip_name2": file_options,
+                "mmproj_name2": (["none"] + s.get_mmproj_list(),),
                 "type": base["required"]["type"],
             }
         }
 
     TITLE = "DualCLIPLoader (GGUF)"
 
-    def load_clip(self, clip_name1, clip_name2, type):
+    def load_clip(self, clip_name1, clip_name2, type, mmproj_name1="none", mmproj_name2="none"):
+        if mmproj_name1 == "none": mmproj_name1 = None
+        if mmproj_name2 == "none": mmproj_name2 = None
         clip_path1 = folder_paths.get_full_path("clip", clip_name1)
         clip_path2 = folder_paths.get_full_path("clip", clip_name2)
         clip_paths = (clip_path1, clip_path2)
+        mmproj_path1 = folder_paths.get_full_path("clip", mmproj_name1) if mmproj_name1 is not None else None
+        mmproj_path2 = folder_paths.get_full_path("clip", mmproj_name2) if mmproj_name2 is not None else None
+        mmproj_paths = (mmproj_path1, mmproj_path2)
         clip_type = getattr(comfy.sd.CLIPType, type.upper(), comfy.sd.CLIPType.STABLE_DIFFUSION)
-        return (self.load_patcher(clip_paths, clip_type, self.load_data(clip_paths)),)
+        return (self.load_patcher(clip_paths, clip_type, self.load_data(clip_paths, mmproj_paths=mmproj_paths)),)
 
 class TripleCLIPLoaderGGUF(CLIPLoaderGGUF):
     @classmethod
@@ -272,20 +296,30 @@ class TripleCLIPLoaderGGUF(CLIPLoaderGGUF):
         return {
             "required": {
                 "clip_name1": file_options,
+                "mmproj_name1": (["none"] + s.get_mmproj_list(),),
                 "clip_name2": file_options,
+                "mmproj_name2": (["none"] + s.get_mmproj_list(),),
                 "clip_name3": file_options,
+                "mmproj_name3": (["none"] + s.get_mmproj_list(),),
             }
         }
 
     TITLE = "TripleCLIPLoader (GGUF)"
 
-    def load_clip(self, clip_name1, clip_name2, clip_name3, type="sd3"):
+    def load_clip(self, clip_name1, clip_name2, clip_name3, type="sd3", mmproj_name1="none", mmproj_name2="none", mmproj_name3="none"):
+        if mmproj_name1 == "none": mmproj_name1 = None
+        if mmproj_name2 == "none": mmproj_name2 = None
+        if mmproj_name3 == "none": mmproj_name3 = None
         clip_path1 = folder_paths.get_full_path("clip", clip_name1)
         clip_path2 = folder_paths.get_full_path("clip", clip_name2)
         clip_path3 = folder_paths.get_full_path("clip", clip_name3)
         clip_paths = (clip_path1, clip_path2, clip_path3)
+        mmproj_path1 = folder_paths.get_full_path("clip", mmproj_name1) if mmproj_name1 is not None else None
+        mmproj_path2 = folder_paths.get_full_path("clip", mmproj_name2) if mmproj_name2 is not None else None
+        mmproj_path3 = folder_paths.get_full_path("clip", mmproj_name3) if mmproj_name3 is not None else None
+        mmproj_paths = (mmproj_path1, mmproj_path2, mmproj_path3)
         clip_type = getattr(comfy.sd.CLIPType, type.upper(), comfy.sd.CLIPType.STABLE_DIFFUSION)
-        return (self.load_patcher(clip_paths, clip_type, self.load_data(clip_paths)),)
+        return (self.load_patcher(clip_paths, clip_type, self.load_data(clip_paths, mmproj_paths=mmproj_paths)),)
 
 class QuadrupleCLIPLoaderGGUF(CLIPLoaderGGUF):
     @classmethod
@@ -293,23 +327,36 @@ class QuadrupleCLIPLoaderGGUF(CLIPLoaderGGUF):
         file_options = (s.get_filename_list(), )
         return {
             "required": {
-            "clip_name1": file_options,
-            "clip_name2": file_options,
-            "clip_name3": file_options,
-            "clip_name4": file_options,
+                "clip_name1": file_options,
+                "mmproj_name1": (["none"] + s.get_mmproj_list(),),
+                "clip_name2": file_options,
+                "mmproj_name2": (["none"] + s.get_mmproj_list(),),
+                "clip_name3": file_options,
+                "mmproj_name3": (["none"] + s.get_mmproj_list(),),
+                "clip_name4": file_options,
+                "mmproj_name4": (["none"] + s.get_mmproj_list(),),
+            }
         }
-    }
 
     TITLE = "QuadrupleCLIPLoader (GGUF)"
 
-    def load_clip(self, clip_name1, clip_name2, clip_name3, clip_name4, type="stable_diffusion"):
+    def load_clip(self, clip_name1, clip_name2, clip_name3, clip_name4, type="stable_diffusion", mmproj_name1="none", mmproj_name2="none", mmproj_name3="none", mmproj_name4="none"):
+        if mmproj_name1 == "none": mmproj_name1 = None
+        if mmproj_name2 == "none": mmproj_name2 = None
+        if mmproj_name3 == "none": mmproj_name3 = None
+        if mmproj_name4 == "none": mmproj_name4 = None
         clip_path1 = folder_paths.get_full_path("clip", clip_name1)
         clip_path2 = folder_paths.get_full_path("clip", clip_name2)
         clip_path3 = folder_paths.get_full_path("clip", clip_name3)
         clip_path4 = folder_paths.get_full_path("clip", clip_name4)
         clip_paths = (clip_path1, clip_path2, clip_path3, clip_path4)
+        mmproj_path1 = folder_paths.get_full_path("clip", mmproj_name1) if mmproj_name1 is not None else None
+        mmproj_path2 = folder_paths.get_full_path("clip", mmproj_name2) if mmproj_name2 is not None else None
+        mmproj_path3 = folder_paths.get_full_path("clip", mmproj_name3) if mmproj_name3 is not None else None
+        mmproj_path4 = folder_paths.get_full_path("clip", mmproj_name4) if mmproj_name4 is not None else None
+        mmproj_paths = (mmproj_path1, mmproj_path2, mmproj_path3, mmproj_path4)
         clip_type = getattr(comfy.sd.CLIPType, type.upper(), comfy.sd.CLIPType.STABLE_DIFFUSION)
-        return (self.load_patcher(clip_paths, clip_type, self.load_data(clip_paths)),)
+        return (self.load_patcher(clip_paths, clip_type, self.load_data(clip_paths, mmproj_paths=mmproj_paths)),)
 
 NODE_CLASS_MAPPINGS = {
     "UnetLoaderGGUF": UnetLoaderGGUF,
