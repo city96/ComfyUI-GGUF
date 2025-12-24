@@ -106,13 +106,24 @@ def gguf_sd_loader(path, handle_prefix="model.diffusion_model.", return_arch=Fal
             torch_tensor = torch.from_numpy(tensor.data) # mmap
 
         shape = get_orig_shape(reader, tensor_name)
+
+        # fallback shape when original shape metadata is missing in GGUF
         if shape is None:
-            shape = torch.Size(tuple(int(v) for v in reversed(tensor.shape)))
+            # tensor.shape may be None in some cases -> use torch_tensor shape as fallback
+            raw_shape = tensor.shape if tensor.shape is not None else torch_tensor.shape
+            shape = torch.Size(tuple(int(v) for v in reversed(raw_shape)))
+
             # Workaround for stable-diffusion.cpp SDXL detection.
             if compat == "sd.cpp" and arch_str == "sdxl":
                 if any([tensor_name.endswith(x) for x in (".proj_in.weight", ".proj_out.weight")]):
                     while len(shape) > 2 and shape[-1] == 1:
                         shape = shape[:-1]
+
+        # --- workaround for lumina2 / NextDiT pad tokens (Z-Image Turbo) ---
+        if arch_str == "lumina2" and sd_key in ("x_pad_token", "cap_pad_token"):
+            if len(shape) == 1:
+                shape = torch.Size((1, shape[0]))
+        # ------------------------------------------------------------------
 
         # add to state dict
         if tensor.tensor_type in {gguf.GGMLQuantizationType.F32, gguf.GGMLQuantizationType.F16}:
