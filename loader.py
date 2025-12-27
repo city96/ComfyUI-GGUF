@@ -33,7 +33,7 @@ def get_field(reader, field_name, field_type):
             raise TypeError(f"Bad type for GGUF {field_name} key: expected string, got {field.types!r}")
         return str(field.parts[field.data[-1]], encoding="utf-8")
     elif field_type in [int, float, bool]:
-        return field_type(field.parts[field.data[-1]])
+        return field_type(field.parts[field.data[-1]].item())
     else:
         raise TypeError(f"Unknown field type {field_type}")
 
@@ -404,3 +404,4 @@ def gguf_clip_loader(path):
     else:
         pass
     return sd
+
