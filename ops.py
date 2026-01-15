@@ -153,7 +153,7 @@ class GGMLLayer(torch.nn.Module):
         if self.largest_layer:
             dequant_dtype = self.gguf_config.dequant_dtype
             shape = getattr(self.weight, "tensor_shape", self.weight.shape)
-            dtype = self.dequant_dtype if self.dequant_dtype and self.dequant_dtype != "target" else torch.float16
+            dtype = dequant_dtype if dequant_dtype and dequant_dtype != "target" else torch.float16
             temp = torch.empty(*shape, device=torch.device("meta"), dtype=dtype)
             destination[prefix + "temp.weight"] = temp
 
