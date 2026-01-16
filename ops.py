@@ -253,7 +253,7 @@ class GGMLOps(comfy.ops.manual_cast):
             output_dtype = out_dtype
             if self.weight.dtype == torch.float16 or self.weight.dtype == torch.bfloat16:
                 out_dtype = None
-            weight, _bias = self.cast_bias_weight(self, device=input.device, dtype=out_dtype)
+            weight, _bias = self.cast_bias_weight(input, dtype=out_dtype)
             return torch.nn.functional.embedding(
                 input, weight, self.padding_idx, self.max_norm, self.norm_type, self.scale_grad_by_freq, self.sparse
             ).to(dtype=output_dtype)
