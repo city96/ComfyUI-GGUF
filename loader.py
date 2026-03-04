@@ -97,12 +97,23 @@ def gguf_sd_loader(path, handle_prefix="model.diffusion_model.", is_text_model=F
         if is_text_model:
             raise ValueError(f"This gguf file is incompatible with llama.cpp!\nConsider using safetensors or a compatible gguf file\n({path})")
         compat = "sd.cpp" if arch_str is None else arch_str
-        # import here to avoid changes to convert.py breaking regular models
-        from .tools.convert import detect_arch
-        try:
-            arch_str = detect_arch(set(val[0] for val in tensors)).arch
-        except Exception as e:
-            raise ValueError(f"This model is not currently supported - ({e})")
+        tensor_keys = set(val[0] for val in tensors)
+        # stable-diffusion.cpp qwen-image tensors overlap some legacy flux/sd3 markers,
+        # so we detect qwen-image directly before generic fallback detection.
+        if {
+            "img_in.weight",
+            "proj_out.weight",
+            "time_text_embed.timestep_embedder.linear_1.weight",
+            "norm_out.linear.weight",
+        }.issubset(tensor_keys):
+            arch_str = "qwen_image"
+        else:
+            # import here to avoid changes to convert.py breaking regular models
+            from .tools.convert import detect_arch
+            try:
+                arch_str = detect_arch(tensor_keys).arch
+            except Exception as e:
+                raise ValueError(f"This model is not currently supported - ({e})")
     elif arch_str not in TXT_ARCH_LIST and is_text_model:
         if type_str not in VIS_TYPE_LIST:
             raise ValueError(f"Unexpected text model architecture type in GGUF file: {arch_str!r}")
@@ -111,6 +122,17 @@ def gguf_sd_loader(path, handle_prefix="model.diffusion_model.", is_text_model=F
 
     if compat:
         logging.warning(f"Warning: This gguf model file is loaded in compatibility mode '{compat}' [arch:{arch_str}]")
+
+    wan_dim = None
+    if compat == "sd.cpp" and arch_str == "wan":
+        # Used to restore collapsed Conv3d patch embedding shape in sd.cpp exports
+        head_mod = next((t for k, t in tensors if k == "head.modulation"), None)
+        if head_mod is not None:
+            mod_shape = get_orig_shape(reader, head_mod.name)
+            if mod_shape is None:
+                mod_shape = torch.Size(tuple(int(v) for v in reversed(head_mod.shape)))
+            if len(mod_shape) >= 1:
+                wan_dim = int(mod_shape[-1])
 
     # main loading loop
     state_dict = {}
@@ -132,6 +154,23 @@ def gguf_sd_loader(path, handle_prefix="model.diffusion_model.", is_text_model=F
                 if any([tensor_name.endswith(x) for x in (".proj_in.weight", ".proj_out.weight")]):
                     while len(shape) > 2 and shape[-1] == 1:
                         shape = shape[:-1]
+            # Workaround for stable-diffusion.cpp Lumina2 pad token shape
+            if compat == "sd.cpp" and arch_str == "lumina2":
+                if len(shape) == 1 and sd_key in {"x_pad_token", "cap_pad_token"}:
+                    shape = torch.Size((1, shape[0]))
+            # Workaround for stable-diffusion.cpp Wan 2.1 shape collapse
+            if compat == "sd.cpp" and arch_str == "wan":
+                if len(shape) == 2 and sd_key.endswith(".modulation"):
+                    shape = torch.Size((1, shape[0], shape[1]))
+                if (
+                    len(shape) == 4
+                    and sd_key.endswith("patch_embedding.weight")
+                    and shape[1] == 1
+                    and wan_dim is not None
+                    and shape[0] % wan_dim == 0
+                ):
+                    in_dim = shape[0] // wan_dim
+                    shape = torch.Size((wan_dim, in_dim, 1, shape[2], shape[3]))
 
         # add to state dict
         if tensor.tensor_type in {gguf.GGMLQuantizationType.F32, gguf.GGMLQuantizationType.F16}:
@@ -141,6 +180,12 @@ def gguf_sd_loader(path, handle_prefix="model.diffusion_model.", is_text_model=F
         # 1D tensors shouldn't be quantized, this is a fix for BF16
         if len(shape) <= 1 and tensor.tensor_type == gguf.GGMLQuantizationType.BF16:
             state_dict[sd_key] = dequantize_tensor(state_dict[sd_key], dtype=torch.float32)
+
+        if compat == "sd.cpp" and len(shape) <= 1 and is_quantized(state_dict[sd_key]):
+            state_dict[sd_key] = dequantize_tensor(state_dict[sd_key], dtype=torch.float32)
+        if compat == "sd.cpp" and arch_str == "wan":
+            if sd_key.endswith(".modulation") and is_quantized(state_dict[sd_key]):
+                state_dict[sd_key] = dequantize_tensor(state_dict[sd_key], dtype=torch.float32)
 
         # keep track of loaded tensor types
         tensor_type_str = getattr(tensor.tensor_type, "name", repr(tensor.tensor_type))
