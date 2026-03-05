@@ -76,9 +76,14 @@ def gguf_sd_loader(path, handle_prefix="model.diffusion_model.", is_text_model=F
     # filter and strip prefix
     has_prefix = False
     if handle_prefix is not None:
-        prefix_len = len(handle_prefix)
         tensor_names = set(tensor.name for tensor in reader.tensors)
+        prefix_len = len(handle_prefix)
         has_prefix = any(s.startswith(handle_prefix) for s in tensor_names)
+        # Some stable-diffusion.cpp exports (anima) use a "net." prefix
+        if (not has_prefix) and (not is_text_model) and tensor_names and all(s.startswith("net.") for s in tensor_names):
+            handle_prefix = "net."
+            prefix_len = len(handle_prefix)
+            has_prefix = True
 
     tensors = []
     for tensor in reader.tensors:
@@ -98,8 +103,7 @@ def gguf_sd_loader(path, handle_prefix="model.diffusion_model.", is_text_model=F
             raise ValueError(f"This gguf file is incompatible with llama.cpp!\nConsider using safetensors or a compatible gguf file\n({path})")
         compat = "sd.cpp" if arch_str is None else arch_str
         tensor_keys = set(val[0] for val in tensors)
-        # stable-diffusion.cpp qwen-image tensors overlap some legacy flux/sd3 markers,
-        # so we detect qwen-image directly before generic fallback detection.
+        # stable-diffusion.cpp qwen-image tensors overlap some legacy flux/sd3 markers
         if {
             "img_in.weight",
             "proj_out.weight",
