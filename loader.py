@@ -270,7 +270,7 @@ def strip_quant_suffix(name):
 
 def gguf_mmproj_loader(path):
     # Reverse version of Qwen2VLVisionModel.modify_tensors
-    logging.info("Attenpting to find mmproj file for text encoder...")
+    logging.info("Attempting to find mmproj file for text encoder...")
 
     # get name to match w/o quant suffix
     tenc_fname = os.path.basename(path)
