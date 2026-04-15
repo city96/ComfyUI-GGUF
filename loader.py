@@ -10,7 +10,7 @@ from .ops import GGMLTensor
 from .dequant import is_quantized, dequantize_tensor
 
 IMG_ARCH_LIST = {"flux", "sd1", "sdxl", "sd3", "aura", "hidream", "cosmos", "ltxv", "hyvid", "wan", "lumina2", "qwen_image"}
-TXT_ARCH_LIST = {"t5", "t5encoder", "llama", "qwen2vl", "qwen3", "qwen3vl", "gemma3"}
+TXT_ARCH_LIST = {"t5", "t5encoder", "llama", "qwen2vl", "qwen3", "qwen3vl", "gemma3", "mistral3"}
 VIS_TYPE_LIST = {"clip-vision", "mmproj"}
 
 def get_orig_shape(reader, tensor_name):
@@ -393,7 +393,7 @@ def gguf_tekken_tokenizer_loader(path, temb_shape):
 
     model_str = get_field(reader, "tokenizer.ggml.model", str)
     if model_str == "gpt2":
-        if temb_shape == (131072, 5120): # probably Mistral
+        if temb_shape == (131072, 5120) or temb_shape == (131072, 3072): # probably Mistral
             data = {
                 "config": {"num_vocab_tokens": 150000, "default_vocab_size": 131072},
                 "vocab": [],
@@ -479,11 +479,11 @@ def gguf_clip_loader(path):
             logging.warning(f"Dequantizing {temb_key} to prevent runtime OOM.")
             sd[temb_key] = dequantize_tensor(sd[temb_key], dtype=torch.float16)
         sd = sd_map_replace(sd, T5_SD_MAP)
-    elif arch in {"llama", "qwen2vl", "qwen3", "qwen3vl", "gemma3"}:
+    elif arch in {"llama", "qwen2vl", "qwen3", "qwen3vl", "gemma3", "mistral3"}:
         # TODO: pass model_options["vocab_size"] to loader somehow
         temb_key = "token_embd.weight"
         if temb_key in sd and sd[temb_key].shape[0] >= (64 * 1024):
-            if arch == "llama" and sd[temb_key].shape == (131072, 5120):
+            if (arch == "llama" and sd[temb_key].shape == (131072, 5120)) or (arch == "mistral3" and sd[temb_key].shape == (131072, 3072)):
                 # non-standard Comfy-Org tokenizer
                 sd["tekken_model"] = gguf_tekken_tokenizer_loader(path, sd[temb_key].shape)
             elif arch == "gemma3":
@@ -496,7 +496,7 @@ def gguf_clip_loader(path):
             sd = gemma3_norm_corrections(sd)
         else:
             sd = sd_map_replace(sd, LLAMA_SD_MAP)
-        if arch == "llama":
+        if arch == "llama" or arch == "mistral3":
             sd = llama_permute(sd, 32, 8) # L3 / Mistral
         if arch == "qwen2vl":
             vsd = gguf_mmproj_loader(path)
