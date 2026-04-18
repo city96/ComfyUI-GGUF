@@ -30,21 +30,23 @@ def get_file_type(reader):
     ft = int(field.parts[field.data[-1]])
     return gguf.LlamaFileType(ft)
 
-def apply_5d_fix(src, dst, fix=None, overwrite=False):
+if __name__ == "__main__":
+    args = get_args()
+
     # read existing
-    reader = gguf.GGUFReader(src)
+    reader = gguf.GGUFReader(args.src)
     arch = get_arch_str(reader)
     file_type = get_file_type(reader)
     print(f"Detected arch: '{arch}' (ftype: {str(file_type)})")
 
     # prep fix
-    if fix is None:
-        fix = f"./fix_5d_tensors_{arch}.safetensors"
+    if args.fix is None:
+        args.fix = f"./fix_5d_tensors_{arch}.safetensors"
  
-    if not os.path.isfile(fix):
-        raise OSError(f"No 5D tensor fix file: {fix}")
+    if not os.path.isfile(args.fix):
+        raise OSError(f"No 5D tensor fix file: {args.fix}")
 
-    sd5d = load_file(fix)
+    sd5d = load_file(args.fix)
     sd5d = {k:v.numpy() for k,v in sd5d.items()}
     print("5D tensors:", sd5d.keys())
 
@@ -53,7 +55,6 @@ def apply_5d_fix(src, dst, fix=None, overwrite=False):
     writer.add_quantization_version(gguf.GGML_QUANT_VERSION)
     writer.add_file_type(file_type)
 
-    global added
     added = []
     def add_extra_key(writer, key, data):
         global added
@@ -75,11 +76,7 @@ def apply_5d_fix(src, dst, fix=None, overwrite=False):
         if key not in added:
             add_extra_key(writer, key, data)
 
-    writer.write_header_to_file(path=dst)
+    writer.write_header_to_file(path=args.dst)
     writer.write_kv_data_to_file()
     writer.write_tensors_to_file(progress=True)
     writer.close()
-
-if __name__ == "__main__":
-    args = get_args()
-    apply_5d_fix(args.src, args.dst, fix=args.fix, overwrite=args.overwrite)
