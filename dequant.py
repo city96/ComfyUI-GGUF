@@ -247,7 +247,7 @@ def dequantize_blocks_IQ4_NL(blocks, block_size, type_size, dtype=None):
     d = d.view(torch.float16).to(dtype)
 
     qs = qs.reshape((n_blocks, -1, 1, block_size//2)) >> torch.tensor([0, 4], device=d.device, dtype=torch.uint8).reshape((1, 1, 2, 1))
-    qs = (qs & 0x0F).reshape((n_blocks, -1, 1)).to(torch.int32)
+    qs = (qs & 0x0F).reshape((n_blocks, -1, 1)).to(torch.int64)
 
     kvalues = KVALUES.to(qs.device).expand(*qs.shape[:-1], 16)
     qs = torch.gather(kvalues, dim=-1, index=qs).reshape((n_blocks, -1))
@@ -277,7 +277,7 @@ def dequantize_blocks_IQ4_XS(blocks, block_size, type_size, dtype=None):
     qs = qs.reshape((n_blocks, -1, 32, 1)) & 0x0F
 
     kvalues = KVALUES.to(qs.device).expand(*qs.shape[:-1], 16)
-    qs = torch.gather(kvalues, dim=-1, index=qs.to(torch.int32)).reshape((n_blocks, -1, 32))
+    qs = torch.gather(kvalues, dim=-1, index=qs.to(torch.int64)).reshape((n_blocks, -1, 32))
     del kvalues # see IQ4_NL
     del shift_a
     del shift_b
