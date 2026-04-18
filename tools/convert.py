@@ -145,8 +145,18 @@ class ModelLumina2(ModelTemplate):
         ("cap_embedder.1.weight", "context_refiner.0.attention.qkv.weight")
     ]
 
+class ModelErnie(ModelTemplate):
+    arch = "ernie"
+    keys_detect = [
+        (
+            "layers.0.self_attention.norm_k.weight",
+            "layers.0.self_attention.norm_q.weight",
+            "final_linear.weight",
+        )
+    ]
+
 arch_list = [ModelFlux, ModelSD3, ModelAura, ModelHiDream, CosmosPredict2, 
-             ModelLTXV, ModelHyVid, ModelWan, ModelSDXL, ModelSD1, ModelLumina2]
+             ModelLTXV, ModelHyVid, ModelWan, ModelSDXL, ModelSD1, ModelLumina2, ModelErnie]
 
 def is_model_arch(model, state_dict):
     # check if model is correct
