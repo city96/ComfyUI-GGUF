@@ -155,10 +155,20 @@ class ModelLumina2(ModelTemplate):
         "cap_pad_token",
     ]
 
+class ModelErnie(ModelTemplate):
+    arch = "ernie"
+    keys_detect = [
+        (
+            "layers.0.self_attention.norm_k.weight",
+            "layers.0.self_attention.norm_q.weight",
+            "final_linear.weight",
+        )
+    ]
+
 # The architectures are checked in order and the first successful match terminates the search.
 arch_list = [
     ModelFlux, ModelSD3, ModelAura, ModelHiDream, ModelCosmosPredict2, ModelQwenImage,
-    ModelLTXV, ModelHyVid, ModelWan, ModelSDXL, ModelSD1, ModelLumina2
+    ModelLTXV, ModelHyVid, ModelWan, ModelSDXL, ModelSD1, ModelLumina2, ModelErnie
 ]
 
 def is_model_arch(model, state_dict):

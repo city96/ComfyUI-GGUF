@@ -270,6 +270,19 @@ class GGMLOps(comfy.ops.manual_cast):
             weight, bias = self.cast_bias_weight(input)
             return torch.nn.functional.group_norm(input, self.num_groups, weight, bias, self.eps)
 
+    class RMSNorm(GGMLLayer, comfy.ops.manual_cast.RMSNorm):
+        def forward_ggml_cast_weights(self, input):
+            if self.weight is None:
+                return super().forward_comfy_cast_weights(input)
+            weight, bias = self.cast_bias_weight(input)
+            # torch.nn.functional.rms_norm is only in 2.4+
+            if hasattr(torch.nn.functional, "rms_norm"):
+                return torch.nn.functional.rms_norm(input, self.normalized_shape, weight, self.eps)
+            else:
+                ssat = input.pow(2).mean(-1, keepdim=True)
+                x = input * torch.rsqrt(ssat + self.eps)
+                return (x * weight).to(input.dtype)
+
 def move_patch_to_device(item, device):
     if isinstance(item, torch.Tensor):
         return item.to(device, non_blocking=True)
