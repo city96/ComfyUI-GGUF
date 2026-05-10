@@ -74,8 +74,29 @@ class GGUFModelPatcher(comfy.model_patcher.ModelPatcher):
                 patches = getattr(p, "patches", [])
                 if len(patches) > 0:
                     p.patches = []
-        # TODO: Find another way to not unload after patches
-        return super().unpatch_model(device_to=device_to, unpatch_weights=unpatch_weights)
+            # Restore non-quantized backups locally so we can short-circuit
+            # super()'s weight-unpatch block — its self.model.to(device_to)
+            # walk crashes with a Windows access violation on the still-mmap'd
+            # quantized tensors (#444). The maintainer's previous mitigation
+            # (Sep 2024 commit 6dbb4ba, reverted in 717a0e1) sidestepped the
+            # walk via device_to=None but skipped backup restoration, breaking
+            # LoRA correctness on subsequent runs (temp_weight in
+            # patch_weight_to_device reads the still-patched current weight).
+            # Doing the restore ourselves keeps non-quantized weights
+            # round-tripping correctly.
+            keys = list(self.backup.keys())
+            for k in keys:
+                bk = self.backup[k]
+                if bk.inplace_update:
+                    comfy.utils.copy_to_param(self.model, k, bk.weight)
+                else:
+                    comfy.utils.set_attr_param(self.model, k, bk.weight)
+            self.model.current_weight_patches_uuid = None
+            self.backup.clear()
+            for m in self.model.modules():
+                if hasattr(m, "comfy_patched_weights"):
+                    del m.comfy_patched_weights
+        return super().unpatch_model(device_to=device_to, unpatch_weights=False)
 
 
     def pin_weight_to_device(self, key):
