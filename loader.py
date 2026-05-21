@@ -8,6 +8,7 @@ import os
 
 from .ops import GGMLTensor
 from .dequant import is_quantized, dequantize_tensor
+from .quant_ops import make_quantized
 
 IMG_ARCH_LIST = {"flux", "sd1", "sdxl", "sd3", "aura", "hidream", "cosmos", "ltxv", "hyvid", "wan", "lumina2", "qwen_image"}
 TXT_ARCH_LIST = {"t5", "t5encoder", "llama", "qwen2vl", "qwen3", "qwen3vl", "gemma3"}
@@ -67,7 +68,7 @@ def get_gguf_metadata(reader):
             continue
     return metadata
 
-def gguf_sd_loader(path, handle_prefix="model.diffusion_model.", is_text_model=False):
+def gguf_sd_loader(path, handle_prefix="model.diffusion_model.", is_text_model=False, dynamic=False):
     """
     Read state dict as fake tensors
     """
@@ -134,9 +135,15 @@ def gguf_sd_loader(path, handle_prefix="model.diffusion_model.", is_text_model=F
                         shape = shape[:-1]
 
         # add to state dict
-        if tensor.tensor_type in {gguf.GGMLQuantizationType.F32, gguf.GGMLQuantizationType.F16}:
-            torch_tensor = torch_tensor.view(*shape)
-        state_dict[sd_key] = GGMLTensor(torch_tensor, tensor_type=tensor.tensor_type, tensor_shape=shape)
+        if dynamic:
+            if tensor.tensor_type not in {gguf.GGMLQuantizationType.F32, gguf.GGMLQuantizationType.F16}:
+                state_dict[sd_key] = make_quantized(torch_tensor, tensor.tensor_type, shape)
+            else:
+                state_dict[sd_key] = torch_tensor.view(*shape)
+        else:
+            if tensor.tensor_type in {gguf.GGMLQuantizationType.F32, gguf.GGMLQuantizationType.F16}:
+                torch_tensor = torch_tensor.view(*shape)
+            state_dict[sd_key] = GGMLTensor(torch_tensor, tensor_type=tensor.tensor_type, tensor_shape=shape)
 
         # 1D tensors shouldn't be quantized, this is a fix for BF16
         if len(shape) <= 1 and tensor.tensor_type == gguf.GGMLQuantizationType.BF16:
@@ -467,8 +474,8 @@ def gguf_gemma3_tokenizer_loader(path):
     del reader
     return torch.ByteTensor(list(spm.SerializeToString()))
 
-def gguf_clip_loader(path):
-    sd, extra = gguf_sd_loader(path, is_text_model=True)
+def gguf_clip_loader(path, dynamic=False):
+    sd, extra = gguf_sd_loader(path, is_text_model=True, dynamic=dynamic)
     arch = extra.get("arch_str", None)
     if arch in {"t5", "t5encoder"}:
         temb_key = "token_embd.weight"
