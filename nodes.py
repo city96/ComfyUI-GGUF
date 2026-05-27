@@ -67,25 +67,25 @@ class GGUFModelPatcher(comfy.model_patcher.ModelPatcher):
             comfy.utils.set_attr_param(self.model, key, out_weight)
 
     def unpatch_model(self, device_to=None, unpatch_weights=True):
+        self.eject_model()
         if unpatch_weights:
             for p in self.model.parameters():
                 if is_torch_compatible(p):
                     continue
-                patches = getattr(p, "patches", [])
-                if len(patches) > 0:
+                if len(getattr(p, "patches", [])) > 0:
                     p.patches = []
-            # Restore non-quantized backups locally so we can short-circuit
-            # super()'s weight-unpatch block — its self.model.to(device_to)
-            # walk crashes with a Windows access violation on the still-mmap'd
-            # quantized tensors (#444). The maintainer's previous mitigation
-            # (Sep 2024 commit 6dbb4ba, reverted in 717a0e1) sidestepped the
-            # walk via device_to=None but skipped backup restoration, breaking
-            # LoRA correctness on subsequent runs (temp_weight in
-            # patch_weight_to_device reads the still-patched current weight).
-            # Doing the restore ourselves keeps non-quantized weights
-            # round-tripping correctly.
-            keys = list(self.backup.keys())
-            for k in keys:
+            # Mirror of base unpatch_model's unpatch_weights block, skipping the
+            # self.model.to(device_to) walk that faults on mmap'd quantized
+            # tensors (#444). Tracking upstream at Comfy-Org/ComfyUI#14142.
+            self.unpatch_hooks()
+            self.unpin_all_weights()
+            if self.model.model_lowvram:
+                for m in self.model.modules():
+                    comfy.model_patcher.move_weight_functions(m, device_to)
+                    comfy.model_patcher.wipe_lowvram_weight(m)
+                self.model.model_lowvram = False
+                self.model.lowvram_patch_counter = 0
+            for k in list(self.backup.keys()):
                 bk = self.backup[k]
                 if bk.inplace_update:
                     comfy.utils.copy_to_param(self.model, k, bk.weight)
@@ -93,6 +93,10 @@ class GGUFModelPatcher(comfy.model_patcher.ModelPatcher):
                     comfy.utils.set_attr_param(self.model, k, bk.weight)
             self.model.current_weight_patches_uuid = None
             self.backup.clear()
+            if device_to is not None:
+                self.model.device = device_to
+            self.model.model_loaded_weight_memory = 0
+            self.model.model_offload_buffer_memory = 0
             for m in self.model.modules():
                 if hasattr(m, "comfy_patched_weights"):
                     del m.comfy_patched_weights
