@@ -90,6 +90,19 @@ class GGMLTensor(torch.Tensor):
             self.tensor_shape = self.size()
         return self.tensor_shape
 
+    @property
+    def dtype(self):
+        # Quantized weights are stored as packed uint8; some models (e.g. Ideogram-4)
+        # do `x.to(weight.dtype)`, which would corrupt activations and break MPS
+        # (linear requires float inputs). Report a float compute dtype for quantized
+        # tensors; F16/F32/unquantized report their real storage dtype.
+        tt = getattr(self, "tensor_type", None)
+        if tt not in (None, gguf.GGMLQuantizationType.F32, gguf.GGMLQuantizationType.F16):
+            # bf16 (not fp16) avoids downcast/saturation on GGML-BF16 models (WAN/FLUX
+            # run bf16 native). compute_dtype, if set by the loader, takes precedence.
+            return getattr(self, "compute_dtype", None) or torch.bfloat16
+        return torch.Tensor.dtype.__get__(self)
+
 class GGMLLayer(torch.nn.Module):
     """
     This (should) be responsible for de-quantizing on the fly
