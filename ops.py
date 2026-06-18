@@ -255,15 +255,29 @@ class GGMLLayer(torch.nn.Module):
                 device = input.device
 
         ostream = None
+        hack_w = not dequant.is_torch_compatible(self.weight)
+        hack_b = not (self.bias is None or dequant.is_torch_compatible(self.bias))
+        if hack_w:
+            wf = self.weight_function
+            self.weight_function = []
+        if hack_b:
+            bf = self.bias_function
+            self.bias_function = []
         try:
-            qweight, qbias, ostream = comfy.ops.cast_bias_weight(
-                self,
-                input=None,
-                device=device,
-                dtype=self.weight.dtype,
-                bias_dtype=None if self.bias is None else self.bias.dtype,
-                offloadable=True,
-            )
+            try:
+                qweight, qbias, ostream = comfy.ops.cast_bias_weight(
+                    self,
+                    input=None,
+                    device=device,
+                    dtype=self.weight.dtype,
+                    bias_dtype=None if self.bias is None else self.bias.dtype,
+                    offloadable=True,
+                )
+            finally:
+                if hack_w:
+                    self.weight_function = wf
+                if hack_b:
+                    self.bias_function = bf
             if qbias is not None:
                 bias = self.get_weight(qbias, dtype, patches_tensor=self.bias)
             weight = self.get_weight(qweight, dtype, patches_tensor=self.weight)
@@ -606,15 +620,22 @@ class GGMLOps(comfy.ops.manual_cast):
                 return None
             oshape = tuple(getattr(weight, "tensor_shape", weight.shape))
             ostream = qweight = qbias = None
+            wf, bf = self.weight_function, self.bias_function
+            self.weight_function = []
+            self.bias_function = []
             try:
-                qweight, qbias, ostream = comfy.ops.cast_bias_weight(
-                    self,
-                    input=None,
-                    device=device,
-                    dtype=self.weight.dtype,
-                    bias_dtype=None if self.bias is None else self.bias.dtype,
-                    offloadable=True,
-                )
+                try:
+                    qweight, qbias, ostream = comfy.ops.cast_bias_weight(
+                        self,
+                        input=None,
+                        device=device,
+                        dtype=self.weight.dtype,
+                        bias_dtype=None if self.bias is None else self.bias.dtype,
+                        offloadable=True,
+                    )
+                finally:
+                    self.weight_function = wf
+                    self.bias_function = bf
 
                 def dequantize_weight(
                     dtype=torch.float32, qweight=qweight
