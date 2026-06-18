@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field as dcfield
+from dataclasses import dataclass
+from dataclasses import field as dcfield
 from typing import Any, TypeVar
 
 import torch
@@ -9,10 +10,15 @@ import triton.language as tl
 from gguf import GGML_QUANT_SIZES, GGMLQuantizationType
 
 C = TypeVar("C")
+
+
 def passthroughdecorator(c: C) -> C:
     return c
 
-nocompiledecorator = getattr(getattr(torch, "compiler", None), "disable", None) or passthroughdecorator
+
+nocompiledecorator = (
+    getattr(getattr(torch, "compiler", None), "disable", None) or passthroughdecorator
+)
 
 TRITON_MAJOR, TRITON_MINOR = (
     int(part) for part in triton.__version__.split(".", 3)[:2]
@@ -35,7 +41,6 @@ else:
     )
     maybestaticmethod = staticmethod
 
-GQT = GGMLQuantizationType
 
 K_SCALE_SIZE = 12
 
@@ -57,20 +62,55 @@ _DEFAULT_AUTOTUNE_CONFIGS: list[triton.Config] = [
     triton.Config({"N_BLOCKS_PER_PROG": 4}, num_warps=8),
 ]
 
-_AUTOTUNE_CONFIGS: dict[str, list[triton.Config]] = {}
+_QUANT_AUTOTUNE_CONFIGS: dict[str, list[triton.Config]] = {}
+
+_DEFAULT_VECTORIZED_AUTOTUNE_CONFIGS: list[triton.Config] = [
+    triton.Config({"BLOCK_N": 16}, num_warps=2),
+    triton.Config({"BLOCK_N": 32}, num_warps=2),
+    triton.Config({"BLOCK_N": 64}, num_warps=4),
+    triton.Config({"BLOCK_N": 128}, num_warps=4),
+    triton.Config({"BLOCK_N": 256}, num_warps=8),
+]
+
+_VECTORIZED_QUANT_AUTOTUNE_CONFIGS: dict[str, list[triton.Config]] = {}
 
 
 @dataclass(frozen=True)
 class KernelImpl:
     type_size: tl.constexpr
     block_size: tl.constexpr
+    # Vectorized kernel related parameters.
+    vectorized: tl.constexpr = dcfield(default_factory=lambda: tl.constexpr(False))
+    chunk_size: tl.constexpr = dcfield(default_factory=lambda: tl.constexpr(32))
+    num_chunks: tl.constexpr = dcfield(default_factory=lambda: tl.constexpr(1))
 
-    def get_autotuner(self, **kwargs: dict) -> triton.runtime.Autotuner:
-        return triton.autotune(**kwargs)(self.dequantize_kernel)
+    @property
+    def have_vectorized(self) -> bool:
+        return bool(getattr(self.vectorized, "value", self.vectorized))
+
+    def get_autotuner(
+        self,
+        *,
+        use_vectorized: bool = True,
+        **kwargs: Any,
+    ) -> triton.runtime.Autotuner:
+        kernel_fn = (
+            self.dequantize_kernel_vectorized
+            if self.have_vectorized and use_vectorized
+            else self.dequantize_kernel
+        )
+        return triton.autotune(**kwargs)(kernel_fn)
 
     @maybestaticmethod
     @triton.jit
-    def dequantize_kernel(q_tensor_ptr, out_tensor_ptr, n_total_blocks, DTYPE: tl.constexpr, N_BLOCKS_PER_PROG: tl.constexpr, CTX: tl.constexpr) -> None:
+    def dequantize_kernel(
+        q_tensor_ptr,
+        out_tensor_ptr,
+        n_total_blocks,
+        DTYPE: tl.constexpr,
+        N_BLOCKS_PER_PROG: tl.constexpr,
+        CTX: tl.constexpr,
+    ) -> None:
         pid = tl.program_id(axis=0)
         start_block_idx = pid * N_BLOCKS_PER_PROG
         n_blocks = n_total_blocks - start_block_idx
@@ -91,6 +131,36 @@ class KernelImpl:
                         DTYPE=DTYPE,
                     )
 
+    @maybestaticmethod
+    @triton.jit
+    def dequantize_kernel_vectorized(
+        q_tensor_ptr,
+        out_tensor_ptr,
+        n_total_blocks,
+        DTYPE: tl.constexpr,
+        BLOCK_N: tl.constexpr,
+        CTX: tl.constexpr,
+    ) -> None:
+        pid = tl.program_id(axis=0)
+        block_indices = pid * BLOCK_N + tl.arange(0, BLOCK_N)
+        mask_1d = block_indices < n_total_blocks
+
+        out_base_ptrs = out_tensor_ptr + block_indices * CTX.value.block_size
+        offsets_chunk = tl.arange(0, CTX.value.chunk_size)
+        base_ptrs = q_tensor_ptr + block_indices * CTX.value.type_size
+
+        for chunk_idx in tl.static_range(CTX.value.num_chunks):
+            dequant = CTX.value.dequantize_chunk_to_registers(
+                base_ptrs, mask_1d, chunk_idx, CTX, DTYPE
+            )
+            # Retain original pointer layouts for the one-shot kernel
+            out_chunk_ptrs = (
+                out_base_ptrs[:, None]
+                + chunk_idx * CTX.value.chunk_size
+                + offsets_chunk[None, :]
+            )
+            tl.store(out_chunk_ptrs, dequant, mask=mask_1d[:, None])
+
 
 class KernelDefinition:
     qtype: GGMLQuantizationType
@@ -98,28 +168,67 @@ class KernelDefinition:
     type_size: int
     kernel: KernelImpl
     autotuner_kernel: triton.runtime.Autotuner
+    use_vectorized: bool
 
-    def __init__(self, qtype: GGMLQuantizationType, kernel_class: type[KernelImpl]):
+    def __init__(
+        self,
+        qtype: GGMLQuantizationType,
+        *,
+        kernel_class: type[KernelImpl] | None = None,
+        kernel_instance: KernelImpl | None = None,
+        use_vectorized: bool = True,
+        **_kwargs: Any,
+    ):
         block_size, type_size = GGML_QUANT_SIZES[qtype]
-        kernel_instance = kernel_class(
-            block_size=tl.constexpr(block_size),
-            type_size=tl.constexpr(type_size),
-        )
+        if kernel_instance is None:
+            if kernel_class is None:
+                raise ValueError(
+                    "At least one of kernel_class or kernel_instance must be set",
+                )
+            kernel_instance = self.kernel = kernel_class(
+                block_size=tl.constexpr(block_size),
+                type_size=tl.constexpr(type_size),
+            )
+        elif kernel_class is not None:
+            raise ValueError(
+                "Only one of kernel_class or kernel_instance may be set",
+            )
+        self.use_vectorized = use_vectorized and self.have_vectorized
+        if self.use_vectorized:
+            default_configs = _DEFAULT_VECTORIZED_AUTOTUNE_CONFIGS
+            quant_configs = _VECTORIZED_QUANT_AUTOTUNE_CONFIGS
+        else:
+            default_configs = _DEFAULT_AUTOTUNE_CONFIGS
+            quant_configs = _QUANT_AUTOTUNE_CONFIGS
         autotuner_kernel = kernel_instance.get_autotuner(
-            configs=_AUTOTUNE_CONFIGS.get(
-                qtype.name.lower(), _DEFAULT_AUTOTUNE_CONFIGS
-            ),
+            use_vectorized=self.use_vectorized,
+            configs=quant_configs.get(qtype.name.lower(), default_configs),
             key=["n_total_blocks"],
         )
         self.qtype = qtype
         self.block_size = block_size
         self.type_size = type_size
-        self.kernel = kernel_instance
         self.autotuner_kernel = autotuner_kernel
+        # print(
+        #     f"DEFINED({qtype}): use vectorized={self.use_vectorized}, have vectorized={self.have_vectorized}, kernel={self.kernel}",
+        # )
 
+    @property
+    def have_vectorized(self) -> bool:
+        return self.kernel.have_vectorized
 
     @nocompiledecorator
-    def __call__(self, blocks: torch.Tensor, block_size: int, type_size: int, dtype: torch.dtype | None = None, _math_dtype: tl.dtype | None = tl.float32) -> torch.Tensor:
+    def __call__(
+        self,
+        blocks: torch.Tensor,
+        block_size: int = -1,
+        type_size: int = -1,
+        dtype: torch.dtype | None = None,
+        *,
+        _math_dtype: tl.dtype | None = tl.float32,
+        _use_vectorized: bool = True,
+        out_tensor: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         qtype, ggml_type_size = self.qtype, self.type_size
         if blocks.dtype != torch.uint8:
             if blocks.dtype == torch.int8:
@@ -150,12 +259,19 @@ class KernelDefinition:
                 f"GGUF Triton {qtype.name}: Unsupported output dtype {dtype}"
             )
 
-        out_tensor = torch.empty(
-            n_total_blocks * self.block_size, dtype=dtype, device=blocks.device
-        )
+        if out_tensor is None:
+            out_tensor = torch.empty(
+                n_total_blocks * self.block_size, dtype=dtype, device=blocks.device
+            )
 
-        def grid(meta: dict[str, Any]) -> tuple[int]:
-            return (triton.cdiv(n_total_blocks, meta["N_BLOCKS_PER_PROG"]),)
+        if self.use_vectorized:
+
+            def grid(meta: dict[str, Any]) -> tuple[int]:
+                return (triton.cdiv(n_total_blocks, meta["BLOCK_N"]),)
+        else:
+
+            def grid(meta: dict[str, Any]) -> tuple[int]:
+                return (triton.cdiv(n_total_blocks, meta["N_BLOCKS_PER_PROG"]),)
 
         self.autotuner_kernel[grid](
             blocks,
@@ -180,9 +296,52 @@ class KernelImpl_K_Quant(KernelImpl):
 
 @dataclass(frozen=True)
 class KernelImpl_Q2_K(KernelImpl_K_Quant):
+    vectorized: tl.constexpr = dcfield(default_factory=lambda: tl.constexpr(True))
+    chunk_size: tl.constexpr = dcfield(default_factory=lambda: tl.constexpr(32))
+    num_chunks: tl.constexpr = dcfield(default_factory=lambda: tl.constexpr(8))
+
     @maybestaticmethod
     @triton.jit
-    def dequantize_block_kernel(block_start_ptr, out_tensor_ptr, CTX: tl.constexpr, DTYPE: tl.constexpr) -> None:
+    def dequantize_chunk_to_registers(
+        base_ptrs, mask_1d, chunk_idx, CTX: tl.constexpr, DTYPE: tl.constexpr
+    ):
+        mask_2d = mask_1d[:, None]
+        offsets_32 = tl.arange(0, 32)
+
+        # 1. Load super-scales
+        d_ptrs = (base_ptrs + 80).to(tl.pointer_type(tl.float16))
+        dmin_ptrs = (base_ptrs + 82).to(tl.pointer_type(tl.float16))
+
+        d = tl.load(d_ptrs, mask=mask_1d, other=0.0).to(DTYPE)
+        dmin = tl.load(dmin_ptrs, mask=mask_1d, other=0.0).to(DTYPE)
+
+        # 2. Block scales (1 scale byte handles 16 elements)
+        scale_idx = chunk_idx * 2 + (offsets_32 // 16)
+        scale_ptrs = base_ptrs[:, None] + scale_idx[None, :]
+        scale_bytes = tl.load(scale_ptrs, mask=mask_2d, other=0)
+
+        dl_scale = (scale_bytes & 0x0F).to(DTYPE)
+        ml_scale = (scale_bytes >> 4).to(DTYPE)
+
+        dl = d[:, None] * dl_scale
+        ml = dmin[:, None] * ml_scale
+
+        # 3. Quantized values (qs)
+        qs_offset = 16 + (chunk_idx // 4) * 32
+        qs_ptrs = base_ptrs[:, None] + qs_offset + offsets_32[None, :]
+        qs_bytes = tl.load(qs_ptrs, mask=mask_2d, other=0)
+
+        shift = (chunk_idx % 4) * 2
+        q_vec = ((qs_bytes >> shift) & 3).to(DTYPE)
+
+        # 4. Dequantize
+        return dl * q_vec - ml
+
+    @maybestaticmethod
+    @triton.jit
+    def dequantize_block_kernel(
+        block_start_ptr, out_tensor_ptr, CTX: tl.constexpr, DTYPE: tl.constexpr
+    ) -> None:
         # Vector of offsets for a 16-element chunk
         offsets_16 = tl.arange(0, 16)
 
@@ -234,9 +393,63 @@ class KernelImpl_Q2_K(KernelImpl_K_Quant):
 
 @dataclass(frozen=True)
 class KernelImpl_Q3_K(KernelImpl_K_Quant):
+    vectorized: tl.constexpr = dcfield(default_factory=lambda: tl.constexpr(True))
+    chunk_size: tl.constexpr = dcfield(default_factory=lambda: tl.constexpr(32))
+    num_chunks: tl.constexpr = dcfield(default_factory=lambda: tl.constexpr(8))
+
     @maybestaticmethod
     @triton.jit
-    def dequantize_block_kernel(block_start_ptr, out_tensor_ptr, CTX: tl.constexpr, DTYPE: tl.constexpr) -> None:
+    def dequantize_chunk_to_registers(
+        base_ptrs, mask_1d, chunk_idx, CTX: tl.constexpr, DTYPE: tl.constexpr
+    ):
+        mask_2d = mask_1d[:, None]
+        offsets_32 = tl.arange(0, 32)
+
+        # 1. Super-scale
+        d_ptrs = (base_ptrs + 108).to(tl.pointer_type(tl.float16))
+        d_super_scale = tl.load(d_ptrs, mask=mask_1d, other=0.0).to(DTYPE)
+
+        # 2. Block scales
+        chunk_16 = chunk_idx * 2 + (offsets_32 // 16)
+
+        lscale_idx = chunk_16 % 8
+        lscale_shift = (chunk_16 // 8) * 4
+        lscale_ptrs = base_ptrs[:, None] + 96 + lscale_idx[None, :]
+        lscale_bytes = tl.load(lscale_ptrs, mask=mask_2d, other=0)
+        lscale_nibble = (lscale_bytes >> lscale_shift) & 0x0F
+
+        hscale_idx = chunk_16 % 4
+        hscale_shift = (chunk_16 // 4) * 2
+        hscale_ptrs = base_ptrs[:, None] + 104 + hscale_idx[None, :]
+        hscale_bytes = tl.load(hscale_ptrs, mask=mask_2d, other=0)
+        hscale_2bit = (hscale_bytes >> hscale_shift) & 0x03
+
+        scale_6bit = lscale_nibble | (hscale_2bit << 4)
+        final_scale = d_super_scale[:, None] * (scale_6bit.to(tl.int8) - 32).to(DTYPE)
+
+        # 3. ql (lower 2 bits)
+        ql_offset = 32 + (chunk_idx // 4) * 32
+        ql_ptrs = base_ptrs[:, None] + ql_offset + offsets_32[None, :]
+        ql_bytes = tl.load(ql_ptrs, mask=mask_2d, other=0)
+        ql_shift = (chunk_idx % 4) * 2
+        ql_vec = (ql_bytes >> ql_shift) & 3
+
+        # 4. qh (higher 1 bit, inverted)
+        qh_ptrs = base_ptrs[:, None] + offsets_32[None, :]
+        qh_bytes = tl.load(qh_ptrs, mask=mask_2d, other=0)
+        # Using chunk_idx as the bit-shift natively replaces the old `qh_source_row` logic!
+        qh_vec = ((qh_bytes >> chunk_idx) & 1) ^ 1
+
+        # 5. Combine and dequantize
+        q_vec = ql_vec.to(tl.int8) - (qh_vec.to(tl.int8) << 2)
+
+        return final_scale * q_vec.to(DTYPE)
+
+    @maybestaticmethod
+    @triton.jit
+    def dequantize_block_kernel(
+        block_start_ptr, out_tensor_ptr, CTX: tl.constexpr, DTYPE: tl.constexpr
+    ) -> None:
         # Vector of offsets for a 16-element chunk (one row of the output matrix)
         offsets_16 = tl.arange(0, 16)
 
@@ -300,10 +513,16 @@ class KernelImpl_Q3_K(KernelImpl_K_Quant):
 
 @dataclass(frozen=True)
 class KernelImpl_Q4_K(KernelImpl_K_Quant):
+    vectorized: tl.constexpr = dcfield(default_factory=lambda: tl.constexpr(True))
+    chunk_size: tl.constexpr = dcfield(default_factory=lambda: tl.constexpr(64))
+    num_chunks: tl.constexpr = dcfield(default_factory=lambda: tl.constexpr(4))
+
     # Helper function, shared by Q4_K and Q5_K.
     @maybestaticmethod
     @triton.jit
-    def get_scales_min(k_idx: int, d_sc_word: tl.tensor, m_word: tl.tensor, m_sc_word: tl.tensor) -> tl.tuple:
+    def get_scales_min(
+        k_idx: int, d_sc_word: tl.tensor, m_word: tl.tensor, m_sc_word: tl.tensor
+    ) -> tl.tuple:
         if k_idx < 4:
             k_idx_x8 = k_idx * 8
             d_sc_byte = d_sc_word >> k_idx_x8
@@ -321,7 +540,51 @@ class KernelImpl_Q4_K(KernelImpl_K_Quant):
 
     @maybestaticmethod
     @triton.jit
-    def dequantize_block_kernel(block_start_ptr, out_tensor_ptr, CTX: tl.constexpr, DTYPE: tl.constexpr) -> None:
+    def dequantize_chunk_to_registers(
+        base_ptrs,
+        mask_1d,
+        chunk_idx,
+        CTX: tl.constexpr,
+        DTYPE: tl.constexpr,
+    ):
+        d_ptrs = base_ptrs.to(tl.pointer_type(tl.float16))
+        d = tl.load(d_ptrs, mask=mask_1d, other=0.0).to(DTYPE)
+        dmin = tl.load(d_ptrs + 1, mask=mask_1d, other=0.0).to(DTYPE)
+
+        scales_ptrs_u32 = (base_ptrs + 4).to(tl.pointer_type(tl.uint32))
+        d_sc_word = tl.load(scales_ptrs_u32, mask=mask_1d, other=0)
+        m_word = tl.load(scales_ptrs_u32 + 1, mask=mask_1d, other=0)
+        m_sc_word = tl.load(scales_ptrs_u32 + 2, mask=mask_1d, other=0)
+
+        k_idx = 2 * chunk_idx
+        sc_a, m_a = CTX.value.get_scales_min(k_idx, d_sc_word, m_word, m_sc_word)
+        sc_b, m_b = CTX.value.get_scales_min(k_idx + 1, d_sc_word, m_word, m_sc_word)
+
+        # Modulo trick for 64 elements (wrapping the 32 bytes)
+        offsets_64 = tl.arange(0, 64)
+        qs_byte_idx = offsets_64 % 32
+        qs_ptrs = base_ptrs[:, None] + 16 + chunk_idx * 32 + qs_byte_idx[None, :]
+        qs_bytes = tl.load(qs_ptrs, mask=mask_1d[:, None], other=0)
+
+        is_high = offsets_64[None, :] >= 32
+        qs_nibbles = tl.where(is_high, qs_bytes >> 4, qs_bytes) & 0x0F
+        qs_vals = qs_nibbles.to(DTYPE)
+
+        # Select the correct scales for the high vs low sides
+        current_d = tl.where(
+            is_high, (d * sc_b.to(DTYPE))[:, None], (d * sc_a.to(DTYPE))[:, None]
+        )
+        current_dm = tl.where(
+            is_high, (dmin * m_b.to(DTYPE))[:, None], (dmin * m_a.to(DTYPE))[:, None]
+        )
+
+        return current_d * qs_vals - current_dm
+
+    @maybestaticmethod
+    @triton.jit
+    def dequantize_block_kernel(
+        block_start_ptr, out_tensor_ptr, CTX: tl.constexpr, DTYPE: tl.constexpr
+    ) -> None:
         offsets_32 = tl.arange(0, 32)
         offsets_scale = offsets_32 + 4 + CTX.value.k_scale_size
 
@@ -357,7 +620,8 @@ class KernelImpl_Q4_K(KernelImpl_K_Quant):
             qs_bytes_chunk = tl.load(chunk_qs_ptr)
 
             qs_low = (qs_bytes_chunk & 0x0F).to(DTYPE)
-            qs_high = (qs_bytes_chunk >> 4).to(DTYPE)
+            # qs_high = (qs_bytes_chunk >> 4).to(DTYPE)
+            qs_high = ((qs_bytes_chunk >> 4) & 0x0F).to(DTYPE)
 
             dequant_low = current_d_a * qs_low - current_dm_a
             dequant_high = current_d_b * qs_high - current_dm_b
@@ -370,9 +634,62 @@ class KernelImpl_Q4_K(KernelImpl_K_Quant):
 
 @dataclass(frozen=True)
 class KernelImpl_Q5_K(KernelImpl_Q4_K):
+    vectorized: tl.constexpr = dcfield(default_factory=lambda: tl.constexpr(True))
+    chunk_size: tl.constexpr = dcfield(default_factory=lambda: tl.constexpr(32))
+    num_chunks: tl.constexpr = dcfield(default_factory=lambda: tl.constexpr(8))
+
     @maybestaticmethod
     @triton.jit
-    def dequantize_block_kernel(block_start_ptr, out_tensor_ptr, CTX: tl.constexpr, DTYPE: tl.constexpr) -> None:
+    def dequantize_chunk_to_registers(
+        base_ptrs,
+        mask_1d,
+        chunk_idx,
+        CTX: tl.constexpr,
+        DTYPE: tl.constexpr,
+    ):
+        mask_2d = mask_1d[:, None]
+        offsets_32 = tl.arange(0, 32)
+
+        # 1. Super-scales
+        d_ptrs = base_ptrs.to(tl.pointer_type(tl.float16))
+        d = tl.load(d_ptrs, mask=mask_1d, other=0.0).to(DTYPE)
+        dmin = tl.load(d_ptrs + 1, mask=mask_1d, other=0.0).to(DTYPE)
+
+        # 2. Block scales
+        scales_ptrs_u32 = (base_ptrs + 4).to(tl.pointer_type(tl.uint32))
+        d_sc_word = tl.load(scales_ptrs_u32, mask=mask_1d, other=0)
+        m_word = tl.load(scales_ptrs_u32 + 1, mask=mask_1d, other=0)
+        m_sc_word = tl.load(scales_ptrs_u32 + 2, mask=mask_1d, other=0)
+
+        sc, m = CTX.value.get_scales_min(chunk_idx, d_sc_word, m_word, m_sc_word)
+        final_d = d * sc.to(DTYPE)
+        final_dm = dmin * m.to(DTYPE)
+
+        # 3. QL (Lower 4 bits)
+        # qs offsets start at 48 (16 byte header + 32 byte qh)
+        qs_byte_offset = (chunk_idx // 2) * 32
+        qs_ptrs = base_ptrs[:, None] + 48 + qs_byte_offset + offsets_32[None, :]
+        qs_bytes = tl.load(qs_ptrs, mask=mask_2d, other=0)
+
+        # Use ALU Mux to avoid branching on the chunk index
+        is_even = (chunk_idx % 2) == 0
+        ql = tl.where(is_even, qs_bytes & 0x0F, (qs_bytes >> 4) & 0x0F)
+
+        # 4. QH (High 1 bit)
+        # qh offsets start at 16
+        qh_ptrs = base_ptrs[:, None] + 16 + offsets_32[None, :]
+        qh_bytes = tl.load(qh_ptrs, mask=mask_2d, other=0)
+        qh_bit = (qh_bytes >> chunk_idx) & 0x01
+
+        # Combine and dequantize
+        q = ql | (qh_bit << 4)
+        return final_d[:, None] * q.to(DTYPE) - final_dm[:, None]
+
+    @maybestaticmethod
+    @triton.jit
+    def dequantize_block_kernel(
+        block_start_ptr, out_tensor_ptr, CTX: tl.constexpr, DTYPE: tl.constexpr
+    ) -> None:
         offsets_32 = tl.arange(0, 32)
         offsets_scale = offsets_32 + 4 + CTX.value.k_scale_size
 
@@ -417,9 +734,59 @@ class KernelImpl_Q5_K(KernelImpl_Q4_K):
 
 @dataclass(frozen=True)
 class KernelImpl_Q6_K(KernelImpl_K_Quant):
+    vectorized: tl.constexpr = dcfield(default_factory=lambda: tl.constexpr(True))
+    chunk_size: tl.constexpr = dcfield(default_factory=lambda: tl.constexpr(32))
+    num_chunks: tl.constexpr = dcfield(default_factory=lambda: tl.constexpr(8))
+
     @maybestaticmethod
     @triton.jit
-    def dequantize_block_kernel(block_start_ptr, out_tensor_ptr, CTX: tl.constexpr, DTYPE: tl.constexpr) -> None:
+    def dequantize_chunk_to_registers(
+        base_ptrs,
+        mask_1d,
+        chunk_idx,
+        CTX: tl.constexpr,
+        DTYPE: tl.constexpr,
+    ):
+        mask_2d = mask_1d[:, None]
+        offsets_32 = tl.arange(0, 32)
+
+        # 1. Super-scale
+        d_ptrs = (base_ptrs + 208).to(tl.pointer_type(tl.float16))
+        d_super_scale = tl.load(d_ptrs, mask=mask_1d, other=0.0).to(DTYPE)
+
+        # 2. QL (Lower 4 bits)
+        ql_offset = (chunk_idx % 2) * 32 + (chunk_idx // 4) * 64
+        ql_ptrs = base_ptrs[:, None] + ql_offset + offsets_32[None, :]
+        ql_bytes = tl.load(ql_ptrs, mask=mask_2d, other=0)
+
+        is_even = ((chunk_idx // 2) % 2) == 0
+        ql_vec = tl.where(is_even, ql_bytes & 0x0F, (ql_bytes >> 4) & 0x0F)
+
+        # 3. QH (High 2 bits)
+        qh_offset = 128 + (chunk_idx // 4) * 32
+        qh_ptrs = base_ptrs[:, None] + qh_offset + offsets_32[None, :]
+        qh_bytes = tl.load(qh_ptrs, mask=mask_2d, other=0)
+
+        bit_shift = (chunk_idx % 4) * 2
+        qh_vec = (qh_bytes >> bit_shift) & 0x03
+
+        # Combine
+        q_vec = (ql_vec | (qh_vec << 4)).to(tl.int8) - 32
+
+        # 4. Scales (int8)
+        scale_idx = chunk_idx * 2 + (offsets_32 // 16)
+        scale_ptrs = base_ptrs[:, None] + 192 + scale_idx[None, :]
+        scale_ptrs_i8 = scale_ptrs.to(tl.pointer_type(tl.int8))
+        scales = tl.load(scale_ptrs_i8, mask=mask_2d, other=0).to(DTYPE)
+
+        # Compute and return!
+        return q_vec.to(DTYPE) * (d_super_scale[:, None] * scales)
+
+    @maybestaticmethod
+    @triton.jit
+    def dequantize_block_kernel(
+        block_start_ptr, out_tensor_ptr, CTX: tl.constexpr, DTYPE: tl.constexpr
+    ) -> None:
         offsets_32 = tl.arange(0, 32)
         mask_16 = offsets_32 < 16
 
@@ -488,9 +855,40 @@ class KernelImpl_Legacy(KernelImpl):
 
 @dataclass(frozen=True)
 class KernelImpl_Q4_0(KernelImpl_Legacy):
+    vectorized: tl.constexpr = dcfield(default_factory=lambda: tl.constexpr(True))
+    chunk_size: tl.constexpr = dcfield(default_factory=lambda: tl.constexpr(32))
+    num_chunks: tl.constexpr = dcfield(default_factory=lambda: tl.constexpr(1))
+
     @maybestaticmethod
     @triton.jit
-    def dequantize_block_kernel(block_start_ptr, out_tensor_ptr, CTX: tl.constexpr, DTYPE: tl.constexpr) -> None:
+    def dequantize_chunk_to_registers(
+        base_ptrs,
+        mask_1d,
+        chunk_idx,
+        CTX: tl.constexpr,
+        DTYPE: tl.constexpr,
+    ):
+        d_ptrs = base_ptrs.to(tl.pointer_type(tl.float16))
+        d = tl.load(d_ptrs, mask=mask_1d, other=0.0).to(DTYPE)
+
+        # Modulo trick: loads [BLOCK_N, 32] layout natively by wrapping the 16 bytes!
+        offsets_32 = tl.arange(0, 32)
+        qs_byte_idx = offsets_32 % 16
+        qs_ptrs = base_ptrs[:, None] + 2 + qs_byte_idx[None, :]
+        qs_bytes = tl.load(qs_ptrs, mask=mask_1d[:, None], other=0)
+
+        # Use an ALU mux to split high/low nibbles in the 32-element register
+        is_high = offsets_32[None, :] >= 16
+        qs_nibbles = tl.where(is_high, qs_bytes >> 4, qs_bytes)
+        q_vals = (qs_nibbles & 0x0F).to(tl.int8, bitcast=True) - 8
+
+        return q_vals.to(DTYPE) * d[:, None]
+
+    @maybestaticmethod
+    @triton.jit
+    def dequantize_block_kernel(
+        block_start_ptr, out_tensor_ptr, CTX: tl.constexpr, DTYPE: tl.constexpr
+    ) -> None:
         # Vector of offsets for the 16 bytes of quantized data
         offsets_16 = tl.arange(0, 16)
 
@@ -520,9 +918,41 @@ class KernelImpl_Q4_0(KernelImpl_Legacy):
 
 @dataclass(frozen=True)
 class KernelImpl_Q4_1(KernelImpl_Legacy):
+    vectorized: tl.constexpr = dcfield(default_factory=lambda: tl.constexpr(True))
+    chunk_size: tl.constexpr = dcfield(default_factory=lambda: tl.constexpr(32))
+    num_chunks: tl.constexpr = dcfield(default_factory=lambda: tl.constexpr(1))
+
     @maybestaticmethod
     @triton.jit
-    def dequantize_block_kernel( block_start_ptr, out_tensor_ptr, CTX: tl.constexpr, DTYPE: tl.constexpr) -> None:
+    def dequantize_chunk_to_registers(
+        base_ptrs, mask_1d, chunk_idx, CTX: tl.constexpr, DTYPE: tl.constexpr
+    ):
+        # 1. Load scale 'd' and min 'm'
+        d_ptrs = base_ptrs.to(tl.pointer_type(tl.float16))
+        d = tl.load(d_ptrs, mask=mask_1d, other=0.0).to(DTYPE)
+
+        m_ptrs = (base_ptrs + 2).to(tl.pointer_type(tl.float16))
+        m = tl.load(m_ptrs, mask=mask_1d, other=0.0).to(DTYPE)
+
+        # 2. Modulo wrapping for 16-byte memory layout
+        offsets_32 = tl.arange(0, 32)
+        qs_byte_idx = offsets_32 % 16
+        qs_ptrs = base_ptrs[:, None] + 4 + qs_byte_idx[None, :]
+        qs_bytes = tl.load(qs_ptrs, mask=mask_1d[:, None], other=0)
+
+        # 3. Unpack into 32 values
+        is_high = offsets_32[None, :] >= 16
+        qs_nibbles = tl.where(is_high, qs_bytes >> 4, qs_bytes)
+        q_vals = (qs_nibbles & 0x0F).to(DTYPE)
+
+        # 4. Dequantize
+        return d[:, None] * q_vals + m[:, None]
+
+    @maybestaticmethod
+    @triton.jit
+    def dequantize_block_kernel(
+        block_start_ptr, out_tensor_ptr, CTX: tl.constexpr, DTYPE: tl.constexpr
+    ) -> None:
         # Vector of offsets for the 16 bytes of quantized data
         offsets_16 = tl.arange(0, 16)
 
@@ -550,39 +980,125 @@ class KernelImpl_Q4_1(KernelImpl_Legacy):
 
 @dataclass(frozen=True)
 class KernelImpl_Q5_0(KernelImpl_Legacy):
+    vectorized: tl.constexpr = dcfield(default_factory=lambda: tl.constexpr(True))
+    chunk_size: tl.constexpr = dcfield(default_factory=lambda: tl.constexpr(32))
+    num_chunks: tl.constexpr = dcfield(default_factory=lambda: tl.constexpr(1))
+
     @maybestaticmethod
     @triton.jit
-    def dequantize_block_kernel(block_start_ptr, out_tensor_ptr, CTX: tl.constexpr, DTYPE: tl.constexpr) -> None:
+    def dequantize_chunk_to_registers(
+        base_ptrs, mask_1d, chunk_idx, CTX: tl.constexpr, DTYPE: tl.constexpr
+    ):
+        # 1. Load scale 'd'
+        d_ptrs = base_ptrs.to(tl.pointer_type(tl.float16))
+        d = tl.load(d_ptrs, mask=mask_1d, other=0.0).to(DTYPE)
+
+        offsets_32 = tl.arange(0, 32)
+
+        # We map each of the 32 elements to the exact 1-byte memory address that holds its high bit.
+        qh_byte_idx = offsets_32 // 8
+        qh_bit_idx = offsets_32 % 8
+
+        qh_ptrs = base_ptrs[:, None] + 2 + qh_byte_idx[None, :]
+        qh_bytes = tl.load(qh_ptrs, mask=mask_1d[:, None], other=0)
+
+        # Extract the specific bit for this element
+        qh_bit = (qh_bytes >> qh_bit_idx[None, :]) & 1
+
+        # 2. Load 16 bytes of low-bits (qs)
+        qs_byte_idx = offsets_32 % 16
+        qs_ptrs = base_ptrs[:, None] + 6 + qs_byte_idx[None, :]
+        qs_bytes = tl.load(qs_ptrs, mask=mask_1d[:, None], other=0)
+
+        # 3. Extract Low bits
+        is_high = offsets_32[None, :] >= 16
+        ql = tl.where(is_high, qs_bytes >> 4, qs_bytes) & 0x0F
+
+        # 4. Combine and apply scale
+        q_vals = (ql | (qh_bit << 4)).to(tl.int8) - 16
+
+        return d[:, None] * q_vals.to(DTYPE)
+
+    @maybestaticmethod
+    @triton.jit
+    def dequantize_block_kernel(
+        block_start_ptr, out_tensor_ptr, CTX: tl.constexpr, DTYPE: tl.constexpr
+    ) -> None:
         offsets_16 = tl.arange(0, 16)
-        offsets_4 = tl.arange(0, 4)
 
         d_ptr = block_start_ptr
         qh_ptr = block_start_ptr + 2
         qs_ptr = block_start_ptr + 6
 
         d = tl.load(d_ptr.to(tl.pointer_type(tl.float16))).to(DTYPE)
-        qh_word = tl.sum(tl.load(qh_ptr + offsets_4).to(tl.uint32) << (offsets_4 << 3))
-
         qs_bytes_16 = tl.load(qs_ptr + offsets_16)
 
+        # --- Low 16 elements (indices 0 to 15) ---
+        qh_byte_low = offsets_16 // 8
+        qh_bit_low = offsets_16 % 8
+        qh_bytes_loaded_low = tl.load(qh_ptr + qh_byte_low)
+
         ql_low = qs_bytes_16 & 0x0F
-        qh_low = (qh_word >> offsets_16) & 1
+        qh_low = (qh_bytes_loaded_low >> qh_bit_low) & 1
         q_low = (ql_low | (qh_low << 4)).to(tl.int8) - 16
-        dequant_low = d * q_low.to(DTYPE)  # Shape: [16]
+        dequant_low = d * q_low.to(DTYPE)
+
+        # --- High 16 elements (indices 16 to 31) ---
+        offsets_16_high = offsets_16 + 16
+        qh_byte_high = offsets_16_high // 8
+        qh_bit_high = offsets_16_high % 8
+        qh_bytes_loaded_high = tl.load(qh_ptr + qh_byte_high)
 
         ql_high = qs_bytes_16 >> 4
-        qh_high = (qh_word >> (offsets_16 + 16)) & 1
+        qh_high = (qh_bytes_loaded_high >> qh_bit_high) & 1
         q_high = (ql_high | (qh_high << 4)).to(tl.int8) - 16
-        dequant_high = d * q_high.to(DTYPE)  # Shape: [16]
+        dequant_high = d * q_high.to(DTYPE)
 
         CTX.value.store_output(out_tensor_ptr, dequant_low, dequant_high)
 
 
 @dataclass(frozen=True)
 class KernelImpl_Q5_1(KernelImpl_Legacy):
+    vectorized: tl.constexpr = dcfield(default_factory=lambda: tl.constexpr(True))
+    chunk_size: tl.constexpr = dcfield(default_factory=lambda: tl.constexpr(32))
+    num_chunks: tl.constexpr = dcfield(default_factory=lambda: tl.constexpr(1))
+
     @maybestaticmethod
     @triton.jit
-    def dequantize_block_kernel(block_start_ptr, out_tensor_ptr, CTX: tl.constexpr, DTYPE: tl.constexpr) -> None:
+    def dequantize_chunk_to_registers(
+        base_ptrs, mask_1d, chunk_idx, CTX: tl.constexpr, DTYPE: tl.constexpr
+    ):
+        # 1. Load 'd', 'm' and high-bit word 'qh'
+        d_ptrs = base_ptrs.to(tl.pointer_type(tl.float16))
+        d = tl.load(d_ptrs, mask=mask_1d, other=0.0).to(DTYPE)
+
+        m_ptrs = (base_ptrs + 2).to(tl.pointer_type(tl.float16))
+        m = tl.load(m_ptrs, mask=mask_1d, other=0.0).to(DTYPE)
+
+        qh_ptrs = (base_ptrs + 4).to(tl.pointer_type(tl.uint32))
+        qh_word = tl.load(qh_ptrs, mask=mask_1d, other=0)
+
+        # 2. Load 16 bytes of low-bits
+        offsets_32 = tl.arange(0, 32)
+        qs_byte_idx = offsets_32 % 16
+        qs_ptrs = base_ptrs[:, None] + 8 + qs_byte_idx[None, :]
+        qs_bytes = tl.load(qs_ptrs, mask=mask_1d[:, None], other=0)
+
+        # 3. Extract Lows and Highs
+        is_high = offsets_32[None, :] >= 16
+        ql = tl.where(is_high, qs_bytes >> 4, qs_bytes) & 0x0F
+        qh_bit = (qh_word[:, None] >> offsets_32[None, :]) & 1
+
+        # 4. Combine and apply scale/bias
+        q_vals = (ql | (qh_bit << 4)).to(DTYPE)
+
+        return d[:, None] * q_vals + m[:, None]
+
+    @maybestaticmethod
+    @triton.jit
+    def dequantize_block_kernel(
+        block_start_ptr, out_tensor_ptr, CTX: tl.constexpr, DTYPE: tl.constexpr
+    ) -> None:
         offsets_16 = tl.arange(0, 16)
 
         # Data layout: 2 bytes 'd', 2 bytes 'm', 4 bytes 'qh', 16 bytes 'qs'
@@ -617,33 +1133,73 @@ class KernelImpl_Q5_1(KernelImpl_Legacy):
 
 @dataclass(frozen=True)
 class KernelImpl_Q8_0(KernelImpl_Legacy):
+    vectorized: tl.constexpr = dcfield(default_factory=lambda: tl.constexpr(True))
+    chunk_size: tl.constexpr = dcfield(default_factory=lambda: tl.constexpr(32))
+    num_chunks: tl.constexpr = dcfield(default_factory=lambda: tl.constexpr(1))
+
     @maybestaticmethod
     @triton.jit
-    def dequantize_block_kernel(block_start_ptr, out_tensor_ptr, CTX: tl.constexpr, DTYPE: tl.constexpr) -> None:
+    def dequantize_chunk_to_registers(
+        base_ptrs, mask_1d, chunk_idx, CTX: tl.constexpr, DTYPE: tl.constexpr
+    ):
+        d_ptrs = base_ptrs.to(tl.pointer_type(tl.float16))
+        d = tl.load(d_ptrs, mask=mask_1d, other=0.0).to(DTYPE)
+
+        offsets_32 = tl.arange(0, 32)
+        x_ptrs = base_ptrs[:, None] + 2 + offsets_32[None, :]
+        x = tl.load(
+            x_ptrs.to(tl.pointer_type(tl.int8)), mask=mask_1d[:, None], other=0
+        ).to(DTYPE)
+
+        return d[:, None] * x
+
+    @maybestaticmethod
+    @triton.jit
+    def dequantize_block_kernel(
+        block_start_ptr, out_tensor_ptr, CTX: tl.constexpr, DTYPE: tl.constexpr
+    ) -> None:
         offsets_32 = tl.arange(0, 32)
         d_ptr = block_start_ptr.to(tl.pointer_type(tl.float16), bitcast=True) + 0
         x_ptr = (
             block_start_ptr.to(tl.pointer_type(tl.int8), bitcast=True) + 2 + offsets_32
         )
         output_ptr = out_tensor_ptr + offsets_32
-        d = d = tl.load(d_ptr).to(DTYPE)
+        d = tl.load(d_ptr).to(DTYPE)
         x = tl.load(x_ptr).to(DTYPE)
         output_ptr.store(d * x)
 
 
-dequantize_functions: dict[GGMLQuantizationType, KernelDefinition] = {
+_type_kernel_class_map: dict[GGMLQuantizationType, type[KernelImpl]] = {
     # Legancy quants
-    GQT.Q4_0: KernelDefinition(GQT.Q4_0, KernelImpl_Q4_0),
-    GQT.Q4_1: KernelDefinition(GQT.Q4_1, KernelImpl_Q4_1),
-    GQT.Q5_0: KernelDefinition(GQT.Q5_0, KernelImpl_Q5_0),
-    GQT.Q5_1: KernelDefinition(GQT.Q5_1, KernelImpl_Q5_1),
-    GQT.Q8_0: KernelDefinition(GQT.Q8_0, KernelImpl_Q8_0),
+    GGMLQuantizationType.Q4_0: KernelImpl_Q4_0,
+    GGMLQuantizationType.Q4_1: KernelImpl_Q4_1,
+    GGMLQuantizationType.Q5_0: KernelImpl_Q5_0,
+    GGMLQuantizationType.Q5_1: KernelImpl_Q5_1,
+    GGMLQuantizationType.Q8_0: KernelImpl_Q8_0,
     # K-quants
-    GQT.Q2_K: KernelDefinition(GQT.Q2_K, KernelImpl_Q2_K),
-    GQT.Q3_K: KernelDefinition(GQT.Q3_K, KernelImpl_Q3_K),
-    GQT.Q4_K: KernelDefinition(GQT.Q4_K, KernelImpl_Q4_K),
-    GQT.Q5_K: KernelDefinition(GQT.Q5_K, KernelImpl_Q5_K),
-    GQT.Q6_K: KernelDefinition(GQT.Q6_K, KernelImpl_Q6_K),
+    GGMLQuantizationType.Q2_K: KernelImpl_Q2_K,
+    GGMLQuantizationType.Q3_K: KernelImpl_Q3_K,
+    GGMLQuantizationType.Q4_K: KernelImpl_Q4_K,
+    GGMLQuantizationType.Q5_K: KernelImpl_Q5_K,
+    GGMLQuantizationType.Q6_K: KernelImpl_Q6_K,
 }
 
-__all__ = ("dequantize_functions",)
+
+def build_dequantize_functions(
+    **kwargs,
+) -> dict[GGMLQuantizationType, KernelDefinition]:
+    return {
+        qtype: KernelDefinition(qtype, kernel_class=kclass, **kwargs)
+        for qtype, kclass in _type_kernel_class_map.items()
+    }
+
+
+dequantize_functions: dict[GGMLQuantizationType, KernelDefinition] = (
+    build_dequantize_functions()
+)
+
+dequantize_functions_legacy: dict[GGMLQuantizationType, KernelDefinition] = (
+    build_dequantize_functions(use_vectorized=False)
+)
+
+__all__ = ("dequantize_functions", "dequantize_functions_legacy")

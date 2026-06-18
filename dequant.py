@@ -13,6 +13,7 @@ try:
 except Exception as exc:
     HAVE_TRITON=False
     print(f"\nGGUF: Failed to enable Triton: {exc}")
+    dequant_triton = None
     triton_dequantize_functions={}
 
 
@@ -25,7 +26,7 @@ class GGUFConfig(NamedTuple):
     dequant_dtype: DequantizeDtype = None
     patch_dtype: DequantizeDtype = None
     patch_on_device: Optional[bool] = None
-    optimize: str = "none"
+    optimize: frozenset[str] = frozenset()
     dequantize_function: Optional[Callable] = None
     dequantize_handlers: Optional[DequantizeHandlersType] = None
 
