@@ -1,10 +1,36 @@
 # (c) City96 || Apache-2.0 (apache.org/licenses/LICENSE-2.0)
+from typing import Callable, Literal, NamedTuple, Optional, Union
+
 import gguf
 import torch
 from tqdm import tqdm
 
+HAVE_BFLOAT16=hasattr(torch, "bfloat16")
+try:
+    from . import dequant_triton
+    triton_dequantize_functions=dequant_triton.dequantize_functions
+    HAVE_TRITON=True
+except Exception as exc:
+    HAVE_TRITON=False
+    print(f"\nGGUF: Failed to enable Triton: {exc}")
+    dequant_triton = None
+    triton_dequantize_functions={}
 
-TORCH_COMPATIBLE_QTYPES = (None, gguf.GGMLQuantizationType.F32, gguf.GGMLQuantizationType.F16)
+
+TORCH_COMPATIBLE_QTYPES = frozenset((None, gguf.GGMLQuantizationType.F32, gguf.GGMLQuantizationType.F16))
+
+DequantizeHandlersType = dict[gguf.GGMLQuantizationType, Callable]
+DequantizeDtype = Optional[Union[torch.dtype, Literal["target"]]]
+
+class GGUFConfig(NamedTuple):
+    dequant_dtype: DequantizeDtype = None
+    patch_dtype: DequantizeDtype = None
+    patch_on_device: Optional[bool] = None
+    optimize: frozenset[str] = frozenset()
+    dequantize_function: Optional[Callable] = None
+    dequantize_handlers: Optional[DequantizeHandlersType] = None
+
+DEFAULT_CONFIG = GGUFConfig()
 
 def is_torch_compatible(tensor):
     return tensor is None or getattr(tensor, "tensor_type", None) in TORCH_COMPATIBLE_QTYPES
@@ -12,27 +38,36 @@ def is_torch_compatible(tensor):
 def is_quantized(tensor):
     return not is_torch_compatible(tensor)
 
-def dequantize_tensor(tensor, dtype=None, dequant_dtype=None):
+def dequantize_tensor(tensor, dtype=None, config: Optional[GGUFConfig]=None):
+    config = config or DEFAULT_CONFIG
     qtype = getattr(tensor, "tensor_type", None)
     oshape = getattr(tensor, "tensor_shape", tensor.shape)
 
     if qtype in TORCH_COMPATIBLE_QTYPES:
         return tensor.to(dtype)
-    elif qtype in dequantize_functions:
-        dequant_dtype = dtype if dequant_dtype == "target" else dequant_dtype
-        return dequantize(tensor.data, qtype, oshape, dtype=dequant_dtype).to(dtype)
-    else:
-        # this is incredibly slow
-        tqdm.write(f"Falling back to numpy dequant for qtype: {getattr(qtype, 'name', repr(qtype))}")
-        new = gguf.quants.dequantize(tensor.cpu().numpy(), qtype)
-        return torch.from_numpy(new).to(tensor.device, dtype=dtype)
+    if qtype == gguf.GGMLQuantizationType.BF16 and HAVE_BFLOAT16:
+        return tensor.view(dtype=torch.bfloat16).reshape(oshape).to(dtype)
+    if qtype in dequantize_functions:
+        dequant_dtype = dtype if config.dequant_dtype == "target" else config.dequant_dtype
+        dequantize_function = config.dequantize_function or dequantize
+        return dequantize_function(
+            tensor.data,
+            qtype,
+            oshape,
+            dtype=dequant_dtype,
+            dequantize_functions_override=config.dequantize_handlers,
+        ).to(dtype)
+    # this is incredibly slow
+    tqdm.write(f"Falling back to numpy dequant for qtype: {getattr(qtype, 'name', repr(qtype))}")
+    new = gguf.quants.dequantize(tensor.cpu().numpy(), qtype)
+    return torch.from_numpy(new).to(tensor.device, dtype=dtype)
 
-def dequantize(data, qtype, oshape, dtype=None):
+def dequantize(data, qtype, oshape, dtype=None, dequantize_functions_override: Optional[DequantizeHandlersType]=None):
     """
     Dequantize tensor back to usable shape/dtype
     """
     block_size, type_size = gguf.GGML_QUANT_SIZES[qtype]
-    dequantize_blocks = dequantize_functions[qtype]
+    dequantize_blocks = (dequantize_functions_override or dequantize_functions)[qtype]
 
     rows = data.reshape(
         (-1, data.shape[-1])
@@ -74,7 +109,7 @@ def dequantize_blocks_Q5_1(blocks, block_size, type_size, dtype=None):
     d, m, qh, qs = split_block_dims(blocks, 2, 2, 4)
     d = d.view(torch.float16).to(dtype)
     m = m.view(torch.float16).to(dtype)
-    qh = to_uint32(qh)
+    qh = qh.contiguous().view(torch.int32)
 
     qh = qh.reshape((n_blocks, 1)) >> torch.arange(32, device=d.device, dtype=torch.int32).reshape(1, 32)
     ql = qs.reshape((n_blocks, -1, 1, block_size // 2)) >> torch.tensor([0, 4], device=d.device, dtype=torch.uint8).reshape(1, 1, 2, 1)
@@ -89,7 +124,7 @@ def dequantize_blocks_Q5_0(blocks, block_size, type_size, dtype=None):
 
     d, qh, qs = split_block_dims(blocks, 2, 4)
     d  = d.view(torch.float16).to(dtype)
-    qh = to_uint32(qh)
+    qh = qh.contiguous().view(torch.int32)
 
     qh = qh.reshape(n_blocks, 1) >> torch.arange(32, device=d.device, dtype=torch.int32).reshape(1, 32)
     ql = qs.reshape(n_blocks, -1, 1, block_size // 2) >> torch.tensor([0, 4], device=d.device, dtype=torch.uint8).reshape(1, 1, 2, 1)

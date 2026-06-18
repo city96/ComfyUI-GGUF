@@ -13,9 +13,10 @@ import comfy.model_patcher
 import comfy.model_management
 import folder_paths
 
-from .ops import GGMLOps, move_patch_to_device
+from .ops import GGMLOps, move_patch_to_device, LORA_CACHE
 from .loader import gguf_sd_loader, gguf_clip_loader
-from .dequant import is_quantized, is_torch_compatible
+from .dequant import is_quantized, is_torch_compatible, HAVE_TRITON, triton_dequantize_functions
+from . import dequant
 
 def update_folder_names_and_paths(key, targets=[]):
     # check for existing key
@@ -147,22 +148,32 @@ class UnetLoaderGGUF:
     CATEGORY = "bootleg"
     TITLE = "Unet Loader (GGUF)"
 
-    def load_unet(self, unet_name, dequant_dtype=None, patch_dtype=None, patch_on_device=None):
-        ops = GGMLOps()
+    def load_unet(self, unet_name, dequant_dtype=None, patch_dtype=None, patch_on_device=None, optimize="none"):
+        dequantize_function = dequantize_handlers = None
+        opt_set = frozenset(optimize.lower().strip().split("_")) if optimize != "none" and optimize else frozenset()
+        if "triton" in opt_set and dequant.dequant_triton is not None:
+            dq_triton = dequant.dequant_triton
+            dequantize_handlers = dequant.dequantize_functions | (dq_triton.dequantize_functions if "legacykernel" not in opt_set else dq_triton.dequantize_functions_legacy)
 
-        if dequant_dtype in ("default", None):
-            ops.Linear.dequant_dtype = None
-        elif dequant_dtype in ["target"]:
-            ops.Linear.dequant_dtype = dequant_dtype
-        else:
-            ops.Linear.dequant_dtype = getattr(torch, dequant_dtype)
+        if dequant_dtype == "default":
+            dequant_dtype = None
+        elif dequant_dtype and dequant_dtype != "target":
+            dequant_dtype = getattr(torch, dequant_dtype)
+        if patch_dtype == "default":
+            patch_dtype = None
+        elif patch_dtype and patch_dtype != "target":
+            patch_dtype = getattr(torch, patch_dtype)
 
-        if patch_dtype in ("default", None):
-            ops.Linear.patch_dtype = None
-        elif patch_dtype in ["target"]:
-            ops.Linear.patch_dtype = patch_dtype
-        else:
-            ops.Linear.patch_dtype = getattr(torch, patch_dtype)
+        config = dequant.GGUFConfig(
+            dequant_dtype = dequant_dtype,
+            patch_dtype = patch_dtype,
+            patch_on_device = patch_on_device,
+            optimize=opt_set,
+            dequantize_function = dequantize_function,
+            dequantize_handlers = dequantize_handlers,
+        )
+        print(f"\nGGUF: Using config {config}")
+        ops = GGMLOps(gguf_config=config)
 
         # init model
         unet_path = folder_paths.get_full_path("unet", unet_name)
@@ -187,12 +198,29 @@ class UnetLoaderGGUFAdvanced(UnetLoaderGGUF):
     @classmethod
     def INPUT_TYPES(s):
         unet_names = [x for x in folder_paths.get_filename_list("unet_gguf")]
+        pretty_triton_quants = ", ".join(
+            k.name if not v.use_vectorized else f"{k.name} (fused)"
+            for k, v in triton_dequantize_functions.items()
+        )
         return {
             "required": {
                 "unet_name": (unet_names,),
-                "dequant_dtype": (["default", "target", "float32", "float16", "bfloat16"], {"default": "default"}),
-                "patch_dtype": (["default", "target", "float32", "float16", "bfloat16"], {"default": "default"}),
+                "dequant_dtype": (
+                    ["default", "target", "float32", "float16", "bfloat16"],
+                    {"default": "default"},
+                ),
+                "patch_dtype": (
+                    ["default", "target", "float32", "float16", "bfloat16"],
+                    {"default": "default"},
+                ),
                 "patch_on_device": ("BOOLEAN", {"default": False}),
+                "optimize": (
+                    ("none", "loracache", "triton", "triton_loracache", "triton_legacykernel", "triton_legacykernel_loracache"),
+                    {
+                        "default": "none",
+                        "tooltip": f"Optimizations:\ntriton: Uses Triton with vectorized kernels, only has an effect if Triton is available.\nlegacykernel: Uses the old style Triton kernels. There shouldn't really be a difference in performance.\nloracache: Enables LoRA caching. WARNING: LoRAs are cached forever in a global cache which can only be cleared/refreshed with the GGUFClearLoRACache node. Memory will be retained and LoRA changes won't have an effect unless you use this node. When enabled, expect the first step to be relatively slow as LoRAs are cached. Additionally, this probably won't work with exotic LoRA types or scheduling LoRAs.\n\nTriton status: {'available' if HAVE_TRITON else 'unavailable'}\nTriton kernels: {pretty_triton_quants}",
+                    },
+                ),
             }
         }
     TITLE = "Unet Loader (GGUF/Advanced)"
@@ -237,7 +265,7 @@ class CLIPLoaderGGUF:
             clip_type = clip_type,
             state_dicts = clip_data,
             model_options = {
-                "custom_operations": GGMLOps,
+                "custom_operations": GGMLOps(),
                 "initial_device": comfy.model_management.text_encoder_offload_device()
             },
             embedding_directory = folder_paths.get_folder_paths("embeddings"),
@@ -318,6 +346,29 @@ class QuadrupleCLIPLoaderGGUF(CLIPLoaderGGUF):
         clip_type = getattr(comfy.sd.CLIPType, type.upper(), comfy.sd.CLIPType.STABLE_DIFFUSION)
         return (self.load_patcher(clip_paths, clip_type, self.load_data(clip_paths)),)
 
+
+class GGUFClearLoRACache:
+    FUNCTION = "go"
+    CATEGORY = "bootleg"
+    RETURN_TYPES =("MODEL",)
+    TITLE = "Clear LoRA cache (GGUF)"
+    DESCRIPTION = "Clears the global GGUF LoRA cache whenever it runs. Generally you would put it after your LoRA model patches so it runs when LoRAs change. LoRA caching can be enabled with the advanced loader and choosing an optimize mode with 'loracache' in it."
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "model": ("MODEL",),
+                "seq": ("INT", {"default": 0, "tooltip": "This parameter isn't used for anything. You can change it to force the node to run and clear the LoRA cache."}),
+            },
+        }
+
+    @classmethod
+    def go(cls, *, model: object, seq: int = 0) -> tuple[object]:
+        LORA_CACHE.clear()
+        return (model,)
+
+
 NODE_CLASS_MAPPINGS = {
     "UnetLoaderGGUF": UnetLoaderGGUF,
     "CLIPLoaderGGUF": CLIPLoaderGGUF,
@@ -325,5 +376,5 @@ NODE_CLASS_MAPPINGS = {
     "TripleCLIPLoaderGGUF": TripleCLIPLoaderGGUF,
     "QuadrupleCLIPLoaderGGUF": QuadrupleCLIPLoaderGGUF,
     "UnetLoaderGGUFAdvanced": UnetLoaderGGUFAdvanced,
+    "GGUFClearLoRACache": GGUFClearLoRACache,
 }
-
