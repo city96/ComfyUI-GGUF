@@ -1,4 +1,5 @@
 # (c) City96 || Apache-2.0 (apache.org/licenses/LICENSE-2.0)
+import contextlib
 import functools
 import logging
 import operator
@@ -198,15 +199,29 @@ class GGMLLayer(torch.nn.Module):
         if bias is not None:
             destination[prefix + "bias"] = self.get_weight(self.bias)
 
-    def get_weight(self, tensor, dtype):
+    def get_weight_patches(self, tensor, device):
+        # consolidate and load patches to GPU in async
+        patch_list = []
+        key = None
+        for patches, key in getattr(tensor, "patches", []):
+            patch_list += move_patch_to_device(patches, device)
+
+        return tuple(patch_list), key
+
+    def get_weight(
+        self, tensor, dtype, patches_tensor=None, apply_patches: bool = True
+    ):
         if tensor is None:
             return
 
-        # consolidate and load patches to GPU in async
-        patch_list = []
         device = tensor.device
-        for patches, key in getattr(tensor, "patches", []):
-            patch_list += move_patch_to_device(patches, device)
+        patch_list, key = (
+            self.get_weight_patches(
+                patches_tensor if patches_tensor is not None else tensor, device
+            )
+            if apply_patches
+            else ((), None)
+        )
 
         # dequantize tensor while patches load
         weight = dequantize_tensor(tensor, dtype, self.gguf_config)
@@ -215,19 +230,18 @@ class GGMLLayer(torch.nn.Module):
         if isinstance(weight, GGMLTensor):
             weight = torch.Tensor(weight)
 
-        patch_dtype = self.gguf_config.patch_dtype
+        if not patch_list:
+            return weight
 
         # apply patches
-        if len(patch_list) > 0:
-            if patch_dtype is None:
-                weight = comfy.lora.calculate_weight(patch_list, weight, key)
-            else:
-                # for testing, may degrade image quality
-                if patch_dtype == "target":
-                    patch_dtype = dtype
-                weight = comfy.lora.calculate_weight(
-                    patch_list, weight, key, patch_dtype
-                )
+        patch_dtype = self.gguf_config.patch_dtype
+        if patch_dtype is None:
+            weight = comfy.lora.calculate_weight(patch_list, weight, key)
+        else:
+            # for testing, may degrade image quality
+            if patch_dtype == "target":
+                patch_dtype = dtype
+            weight = comfy.lora.calculate_weight(patch_list, weight, key, patch_dtype)
         return weight
 
     @torch_compiler_disable()
@@ -240,19 +254,23 @@ class GGMLLayer(torch.nn.Module):
             if device is None:
                 device = input.device
 
-        bias = None
-        non_blocking = model_management.device_supports_non_blocking(device)
-        if self.bias is not None:
-            bias = self.get_weight(self.bias.to(device), dtype)
-            bias = comfy.ops.cast_to(
-                bias, bias_dtype, device, non_blocking=non_blocking, copy=False
+        ostream = None
+        try:
+            qweight, qbias, ostream = comfy.ops.cast_bias_weight(
+                self,
+                input=None,
+                device=device,
+                dtype=self.weight.dtype,
+                bias_dtype=None if self.bias is None else self.bias.dtype,
+                offloadable=True,
             )
-
-        weight = self.get_weight(self.weight.to(device), dtype)
-        weight = comfy.ops.cast_to(
-            weight, dtype, device, non_blocking=non_blocking, copy=False
-        )
-        return weight, bias
+            if qbias is not None:
+                bias = self.get_weight(qbias, dtype, patches_tensor=self.bias)
+            weight = self.get_weight(qweight, dtype, patches_tensor=self.weight)
+            return weight, bias
+        finally:
+            if ostream is not None:
+                comfy.ops.uncast_bias_weight(self, qweight, qbias, ostream)
 
     def forward_comfy_cast_weights(self, input, *args, **kwargs):
         if self.is_ggml_quantized():
@@ -393,7 +411,6 @@ class GGMLOps(comfy.ops.manual_cast):
             patches,
             weight_shape: tuple[int, ...],
             dequantize_weight: Callable[[torch.dtype], torch.Tensor],
-            non_blocking: bool = False,
             rank_threshold: float = 1e-05,
             max_rank: int = 256,
             decomp_iters: int = 2,
@@ -405,14 +422,12 @@ class GGMLOps(comfy.ops.manual_cast):
                 return None, None
 
             # print(f"\nFLAT PATCHES: {patches}")
-            # patch_hashes = tuple(hash_patch(p) for p in flat_patches)
             patch_hashes = None
             patch_ids = tuple(id(p) for p in flat_patches)
             patch_key = pk
 
             device, dtype = x.device, x.dtype
             cache_key = (id(self),)
-            # cache_key = (id(self), *patch_ids)
             orig_cache_item = cache_item = LORA_CACHE.get(cache_key)
             if cache_item and (
                 weight_shape != cache_item.weight_shape
@@ -586,57 +601,58 @@ class GGMLOps(comfy.ops.manual_cast):
             if weight is None or dequant.is_torch_compatible(weight):
                 return None
             qtype = getattr(weight, "tensor_type", None)
-            oshape = tuple(getattr(weight, "tensor_shape", weight.shape))
             qfun = self.gguf_config.dequantize_handlers.get(qtype)
-            bias = getattr(self, "bias", None)
-            non_blocking = model_management.device_supports_non_blocking(device)
-            # print(f"\nPATCH LEN: {len(patches)}")
-            weight = model_management.cast_to(
-                weight.data,
-                dtype=None,
-                device=device,
-                non_blocking=non_blocking,
-                copy=False,
-            )
-
-            def dequantize_weight(dtype=torch.float32) -> torch.Tensor:
-                return qfun(
-                    weight,
-                    dtype=dtype,
-                    block_size=qfun.block_size,
-                    type_size=qfun.type_size,
-                ).reshape(oshape)
-
-            if patches:
-                lora_result, patched_weight = self._get_lora(
-                    x=input,
-                    patches=patches,
-                    weight_shape=oshape,
-                    dequantize_weight=dequantize_weight,
-                    non_blocking=non_blocking,
-                )
-                lora_A, lora_B = (
-                    lora_result if lora_result is not None else (None, None)
-                )
-            else:
-                lora_A = lora_B = patched_weight = None
-            if self.bias is not None:
-                bias = self.get_weight(self.bias.to(device), dtype)
-                bias = model_management.cast_to(
-                    bias,
-                    dtype=dtype,
+            if not (hasattr(qfun, "block_size") and hasattr(qfun, "type_size")):
+                return None
+            oshape = tuple(getattr(weight, "tensor_shape", weight.shape))
+            ostream = qweight = qbias = None
+            try:
+                qweight, qbias, ostream = comfy.ops.cast_bias_weight(
+                    self,
+                    input=None,
                     device=device,
-                    non_blocking=non_blocking,
-                    copy=False,
-                ).data
-            if patched_weight is None:
-                patched_weight = dequantize_weight(input.dtype)
+                    dtype=self.weight.dtype,
+                    bias_dtype=None if self.bias is None else self.bias.dtype,
+                    offloadable=True,
+                )
+
+                def dequantize_weight(
+                    dtype=torch.float32, qweight=qweight
+                ) -> torch.Tensor:
+                    out = qfun(
+                        qweight,
+                        dtype=dtype,
+                        block_size=qfun.block_size,
+                        type_size=qfun.type_size,
+                    )
+                    return out.reshape(oshape)
+
+                if patches:
+                    lora_result, patched_weight = self._get_lora(
+                        x=input,
+                        patches=patches,
+                        weight_shape=oshape,
+                        dequantize_weight=dequantize_weight,
+                    )
+                    lora_A, lora_B = (
+                        lora_result if lora_result is not None else (None, None)
+                    )
+                else:
+                    lora_A = lora_B = patched_weight = None
+                if qbias is not None:
+                    bias = self.get_weight(qbias, dtype, patches_tensor=self.bias)
+                if patched_weight is None:
+                    patched_weight = dequantize_weight(input.dtype)
+            finally:
+                if ostream is not None:
+                    comfy.ops.uncast_bias_weight(self, qweight, qbias, ostream)
+            del qweight, qbias, ostream
+
             already_patched = lora_A is None or lora_B is None
             if not already_patched:
                 M = input.numel() // input.shape[-1]
                 K, N = self.in_features, self.out_features
                 use_activation = M <= ((N * K) / max(1, N + K))
-                # use_activation = False
                 if not use_activation:
                     patched_weight.addmm_(lora_B.T, lora_A.T, alpha=1.0, beta=1.0)
                     already_patched = True
