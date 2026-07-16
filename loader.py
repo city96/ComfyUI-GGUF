@@ -142,6 +142,12 @@ def gguf_sd_loader(path, handle_prefix="model.diffusion_model.", is_text_model=F
         if len(shape) <= 1 and tensor.tensor_type == gguf.GGMLQuantizationType.BF16:
             state_dict[sd_key] = dequantize_tensor(state_dict[sd_key], dtype=torch.float32)
 
+        # GGMLLayer only intercepts weight/bias, so anything else (e.g. bare
+        # nn.Parameters such as LTX-2's learnable_registers) reaches torch's
+        # default load path and must already be a real float tensor.
+        elif not sd_key.endswith((".weight", ".bias")) and is_quantized(state_dict[sd_key]):
+            state_dict[sd_key] = dequantize_tensor(state_dict[sd_key], dtype=torch.float32)
+
         # keep track of loaded tensor types
         tensor_type_str = getattr(tensor.tensor_type, "name", repr(tensor.tensor_type))
         qtype_dict[tensor_type_str] = qtype_dict.get(tensor_type_str, 0) + 1
