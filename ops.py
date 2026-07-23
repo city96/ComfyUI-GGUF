@@ -90,6 +90,21 @@ class GGMLTensor(torch.Tensor):
             self.tensor_shape = self.size()
         return self.tensor_shape
 
+    def dequantize(self, dtype=None):
+        """Return a plain (un-packed) torch.Tensor of the real weights.
+
+        ComfyUI core's generic ``comfy.ops.cast_bias_weight`` only dequantizes
+        ``QuantizedTensor`` weights, so a GGUF ``GGMLTensor`` slips through
+        un-dequantized and reaches ``F.linear`` with its block-packed storage
+        shape, which crashes on a shape mismatch. Exposing this method lets the
+        generic path dequantize GGUF weights the same way ``GGMLLayer.get_weight``
+        already does, without core having to know about the GGUF types.
+        """
+        dt = dtype if dtype is not None else torch.float32
+        w = dequantize_tensor(self, dt, None)
+        # prevent propagating the custom tensor class
+        return torch.Tensor(w)
+
 class GGMLLayer(torch.nn.Module):
     """
     This (should) be responsible for de-quantizing on the fly
