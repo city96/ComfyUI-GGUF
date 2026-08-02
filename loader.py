@@ -87,6 +87,12 @@ def gguf_sd_loader(path, handle_prefix="model.diffusion_model.", is_text_model=F
             if not tensor_name.startswith(handle_prefix):
                 continue
             sd_key = tensor_name[prefix_len:]
+        # Some GGUF conversions (e.g. sd.cpp-style "bfl_format" repacks of
+        # non-Flux archs like LongCat) name QK-norm params ".scale" instead
+        # of the ".weight" that comfy's RMSNorm module actually registers,
+        # so they'd otherwise silently fail to load (-> NaNs downstream).
+        if sd_key.endswith(".query_norm.scale") or sd_key.endswith(".key_norm.scale"):
+            sd_key = sd_key[:-len(".scale")] + ".weight"
         tensors.append((sd_key, tensor))
 
     # detect and verify architecture
