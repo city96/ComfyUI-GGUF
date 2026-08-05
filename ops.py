@@ -8,6 +8,11 @@ import comfy.lora
 import comfy.model_management
 from .dequant import dequantize_tensor, is_quantized
 
+try:
+    import comfy.weight_adapter as wadapter
+except (ImportError, ModuleNotFoundError):
+    wadapter = None
+
 def chained_hasattr(obj, chained_attr):
     probe = obj
     for attr in chained_attr.split('.'):
@@ -253,7 +258,7 @@ class GGMLOps(comfy.ops.manual_cast):
             output_dtype = out_dtype
             if self.weight.dtype == torch.float16 or self.weight.dtype == torch.bfloat16:
                 out_dtype = None
-            weight, _bias = self.cast_bias_weight(self, device=input.device, dtype=out_dtype)
+            weight, _bias = self.cast_bias_weight(input, dtype=out_dtype)
             return torch.nn.functional.embedding(
                 input, weight, self.padding_idx, self.max_norm, self.norm_type, self.scale_grad_by_freq, self.sparse
             ).to(dtype=output_dtype)
@@ -270,12 +275,28 @@ class GGMLOps(comfy.ops.manual_cast):
             weight, bias = self.cast_bias_weight(input)
             return torch.nn.functional.group_norm(input, self.num_groups, weight, bias, self.eps)
 
-def move_patch_to_device(item, device):
-    if isinstance(item, torch.Tensor):
-        return item.to(device, non_blocking=True)
-    elif isinstance(item, tuple):
-        return tuple(move_patch_to_device(x, device) for x in item)
-    elif isinstance(item, list):
-        return [move_patch_to_device(x, device) for x in item]
-    else:
+def move_patch_to_device(item, device, *, dtype=None):
+    if device is None:
         return item
+    if isinstance(item, torch.Tensor):
+        return comfy.model_management.cast_to_device(item, device, dtype, copy=True)
+    if isinstance(item, (tuple, list)):
+        return item.__class__(
+            move_patch_to_device(seqitem, device, dtype=dtype) for seqitem in item
+        )
+    if (
+        wadapter is not None
+        and isinstance(item, wadapter.WeightAdapterBase)
+        and hasattr(item, "loaded_keys")
+        and isinstance(getattr(item, "weights", None), (tuple, list))
+    ):
+        return item.__class__(
+            item.loaded_keys,
+            item.weights.__class__(
+                wi
+                if not isinstance(wi, torch.Tensor)
+                else comfy.model_management.cast_to_device(wi, device, dtype, copy=True)
+                for wi in item.weights
+            ),
+        )
+    return item

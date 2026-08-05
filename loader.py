@@ -5,13 +5,71 @@ import torch
 import gguf
 import re
 import os
+import numpy as np
 
+from gguf import GGUFReader, GGUFValueType
 from .ops import GGMLTensor
 from .dequant import is_quantized, dequantize_tensor
+from .quant_ops import make_quantized
 
-IMG_ARCH_LIST = {"flux", "sd1", "sdxl", "sd3", "aura", "hidream", "cosmos", "ltxv", "hyvid", "wan", "lumina2", "qwen_image"}
-TXT_ARCH_LIST = {"t5", "t5encoder", "llama", "qwen2vl", "qwen3", "qwen3vl", "gemma3"}
+IMG_ARCH_LIST = {"flux", "sd1", "sdxl", "sd3", "aura", "hidream", "cosmos", "ltxv", "hyvid", "wan", "lumina2", "qwen_image", "ideogram4", "krea2"}
+TXT_ARCH_LIST = {"t5", "t5encoder", "llama", "qwen2vl", "qwen3", "qwen3vl", "gemma3", "gemma4"}
 VIS_TYPE_LIST = {"clip-vision", "mmproj"}
+
+class LazyGGUFReader(GGUFReader):
+    def _get_field_parts(self, orig_offs: int, raw_type: int):
+        gtype = GGUFValueType(raw_type)
+        
+        if gtype == GGUFValueType.ARRAY:
+            raw_itype = self._get(orig_offs, np.uint32)
+            offs = orig_offs + int(raw_itype.nbytes)
+            alen = self._get(offs, np.uint64)
+            array_len = alen[0]
+
+            if array_len > 1000:
+                offs += int(alen.nbytes) 
+                sub_type = raw_itype[0]
+                types = [gtype, GGUFValueType(sub_type)]
+                aparts = [raw_itype, alen]
+                data_idxs = []
+                data_view = self.data
+                is_swapped = (self.byte_order == 'S')
+                
+                if sub_type == 8:
+                    for _ in range(array_len):
+                        slen_arr = data_view[offs : offs + 8]
+                        slen = slen_arr.view(dtype=np.uint64)[0]
+                        if is_swapped:
+                            slen = slen.newbyteorder('S')
+                        
+                        str_total_bytes = 8 + int(slen)
+                        sdata_arr = data_view[offs + 8 : offs + str_total_bytes]
+                        
+                        idxs_offs = len(aparts)
+                        aparts.append(slen_arr)
+                        aparts.append(sdata_arr)
+                        data_idxs.append(idxs_offs + 1)                      
+                        offs += str_total_bytes
+
+                    return offs - orig_offs, aparts, data_idxs, types
+                else:
+                    nptype = self.gguf_scalar_to_np.get(GGUFValueType(sub_type))
+                    if nptype is not None:
+                        item_size = np.dtype(nptype).itemsize
+                        total_bytes = array_len * item_size
+                        total_data = data_view[offs : offs + total_bytes].view(dtype=nptype)
+                        if is_swapped:
+                            total_data = total_data.newbyteorder('S')
+                        
+                        idxs_offs = len(aparts)
+                        aparts.extend(total_data[i : i + 1] for i in range(array_len))
+                        data_idxs = list(range(idxs_offs, idxs_offs + array_len))                      
+                        offs += total_bytes
+
+                        return offs - orig_offs, aparts, data_idxs, types
+
+        return super()._get_field_parts(orig_offs, raw_type)
+
 
 def get_orig_shape(reader, tensor_name):
     field_key = f"comfy.gguf.orig_shape.{tensor_name}"
@@ -67,11 +125,11 @@ def get_gguf_metadata(reader):
             continue
     return metadata
 
-def gguf_sd_loader(path, handle_prefix="model.diffusion_model.", is_text_model=False):
+def gguf_sd_loader(path, handle_prefix="model.diffusion_model.", is_text_model=False, dynamic=False):
     """
     Read state dict as fake tensors
     """
-    reader = gguf.GGUFReader(path)
+    reader = LazyGGUFReader(path)
 
     # filter and strip prefix
     has_prefix = False
@@ -134,13 +192,14 @@ def gguf_sd_loader(path, handle_prefix="model.diffusion_model.", is_text_model=F
                         shape = shape[:-1]
 
         # add to state dict
-        if tensor.tensor_type in {gguf.GGMLQuantizationType.F32, gguf.GGMLQuantizationType.F16}:
-            torch_tensor = torch_tensor.view(*shape)
-        state_dict[sd_key] = GGMLTensor(torch_tensor, tensor_type=tensor.tensor_type, tensor_shape=shape)
-
-        # 1D tensors shouldn't be quantized, this is a fix for BF16
-        if len(shape) <= 1 and tensor.tensor_type == gguf.GGMLQuantizationType.BF16:
-            state_dict[sd_key] = dequantize_tensor(state_dict[sd_key], dtype=torch.float32)
+        if tensor.tensor_type == gguf.GGMLQuantizationType.BF16:
+            state_dict[sd_key] = torch_tensor.view(torch.bfloat16).reshape(*shape)
+        elif tensor.tensor_type in {gguf.GGMLQuantizationType.F32, gguf.GGMLQuantizationType.F16}:
+            state_dict[sd_key] = torch_tensor.view(*shape)
+        elif dynamic:
+            state_dict[sd_key] = make_quantized(torch_tensor, tensor.tensor_type, shape)
+        else:
+            state_dict[sd_key] = GGMLTensor(torch_tensor, tensor_type=tensor.tensor_type, tensor_shape=shape)
 
         # keep track of loaded tensor types
         tensor_type_str = getattr(tensor.tensor_type, "name", repr(tensor.tensor_type))
@@ -160,6 +219,8 @@ def gguf_sd_loader(path, handle_prefix="model.diffusion_model.", is_text_model=F
         "arch_str": arch_str,
         "metadata": get_gguf_metadata(reader)
     }
+    if is_text_model:
+        extra["reader"] = reader
     return (state_dict, extra)
 
 # for remapping llama.cpp -> original key names
@@ -206,6 +267,19 @@ GEMMA3_SD_MAP.update({
     "post_attention_norm": "post_attention_layernorm",
 })
 
+GEMMA4_SD_MAP = {
+    "per_layer_token_embd": "model.embed_tokens_per_layer",
+    "per_layer_model_proj": "model.per_layer_model_projection",
+    "proj.weight": "per_layer_projection.weight",
+}
+GEMMA4_SD_MAP.update(GEMMA3_SD_MAP)
+GEMMA4_SD_MAP.update({
+    "layer_output_scale.weight": "layer_scalar",
+    "inp_gate.weight": "per_layer_input_gate.weight",
+    "post_norm.weight": "post_per_layer_input_norm.weight",
+    "per_layer_proj_norm": "model.per_layer_projection_norm",
+})
+
 CLIP_VISION_SD_MAP = {
     "mm.": "visual.merger.mlp.",
     "v.post_ln.": "visual.merger.ln_q.",
@@ -217,6 +291,53 @@ CLIP_VISION_SD_MAP = {
     "attn_out.": "attn.proj.",
     "ln1.": "norm1.",
     "ln2.": "norm2.",
+}
+
+CLIP_VISION_QWEN3_MAP = {
+    "v.blk": "model.visual.blocks",  
+    ".fc": ".linear_fc",
+    "ck.8.": "st.0.",
+    "ck.16.": "st.1.",
+    "ck.24.": "st.2.",
+    "ck.5.": "st.0.",
+    "ck.11.": "st.1.",
+    "ck.17.": "st.2.",
+    "attn_out": "attn.proj",
+    "ln1": "norm1",
+    "ln2": "norm2",
+    "attn_qkv": "attn.qkv",
+    "ffn_up": "mlp.linear_fc1",
+    "ffn_down": "mlp.linear_fc2",
+    "mm.0": "model.visual.merger.linear_fc1",
+    "mm.2": "model.visual.merger.linear_fc2",
+    "v.post_ln": "model.visual.merger.norm",
+    "v.patch_embd": "model.visual.patch_embed.proj",
+    "v.position_embd.weight": "visual.pos_embed.weight",
+    "v.deepstast.": "model.visual.deepstack_merger_list.",
+}
+
+CLIP_VISION_GEMMA4_MAP = {
+    "v.position_embd.weight": "vision_model.patch_embedder.position_embedding_table",
+    "mm.input_projection": "multi_modal_projector.embedding_projection",
+    "mm.a.input_projection": "audio_projector.embedding_projection",
+    "attn_post_norm": "post_attention_layernorm",
+    "ffn_post_norm": "post_feedforward_layernorm",
+    "attn_k_norm": "self_attn.k_norm",
+    "attn_q_norm": "self_attn.q_norm",
+    "ln1.weight": "input_layernorm.weight",
+    "ln2.weight": "pre_feedforward_layernorm.weight",
+    "attn_out.": "self_attn.o_proj.",
+    "attn_k.": "self_attn.k_proj.",
+    "attn_q.": "self_attn.q_proj.",
+    "attn_v.": "self_attn.v_proj.",
+    "ffn_down.": "mlp.down_proj.",
+    "ffn_gate.": "mlp.gate_proj.",
+    "ffn_up.": "mlp.up_proj.",
+    "r0.weight": "r0.conv.weight",
+    "r1.weight": "r1.conv.weight",
+    "v.blk": "vision_model.encoder.layers",
+    "_proj.weight": "_proj.linear.weight",
+    "v.patch_embd.": "vision_model.patch_embedder.input_proj.",
 }
 
 def sd_map_replace(raw_sd, key_map):
@@ -268,9 +389,9 @@ def strip_quant_suffix(name):
         name = name[:match.start()]
     return name
 
-def gguf_mmproj_loader(path):
+def gguf_mmproj_loader(path, dynamic=False):
     # Reverse version of Qwen2VLVisionModel.modify_tensors
-    logging.info("Attenpting to find mmproj file for text encoder...")
+    logging.info("Attempting to find mmproj file for text encoder...")
 
     # get name to match w/o quant suffix
     tenc_fname = os.path.basename(path)
@@ -290,14 +411,19 @@ def gguf_mmproj_loader(path):
             target.append(fname)
 
     if len(target) == 0:
-        logging.error(f"Error: Can't find mmproj file for '{tenc_fname}' (matching:'{tenc}')! Qwen-Image-Edit will be broken!")
+        logging.warning(f"Can't find mmproj file for '{tenc_fname}' (matching:'{tenc}'), vision function will not work!")
         return {}
     if len(target) > 1:
-        logging.error(f"Ambiguous mmproj for text encoder '{tenc_fname}', will use first match.")
+        logging.info(f"Ambiguous mmproj for text encoder '{tenc_fname}', will use first match.")
 
     logging.info(f"Using mmproj '{target[0]}' for text encoder '{tenc_fname}'.")
     target = os.path.join(root, target[0])
-    vsd, _ = gguf_sd_loader(target, is_text_model=True)
+    vsd, _ = gguf_sd_loader(target, is_text_model=True, dynamic=dynamic)
+
+    # gemma4
+    if "mm.a.input_projection.weight" in vsd:
+        vsd["v.patch_embd.weight"] = vsd["v.patch_embd.weight"].permute(0, 2, 3, 1).flatten(start_dim=1)  
+        return sd_map_replace(vsd, CLIP_VISION_GEMMA4_MAP)
 
     # concat 4D to 5D
     if "v.patch_embd.weight.1" in vsd:
@@ -305,7 +431,11 @@ def gguf_mmproj_loader(path):
         w2 = dequantize_tensor(vsd.pop("v.patch_embd.weight.1"), dtype=torch.float32)
         vsd["v.patch_embd.weight"] = torch.stack([w1, w2], dim=2)
 
-    # run main replacement
+    # qwen3vl
+    if any("deepstack" in key for key in vsd): 
+        return sd_map_replace(vsd, CLIP_VISION_QWEN3_MAP)
+
+    # qwen2vl
     vsd = sd_map_replace(vsd, CLIP_VISION_SD_MAP)
 
     # handle split Q/K/V
@@ -334,7 +464,7 @@ def gguf_mmproj_loader(path):
 
     return vsd
 
-def gguf_tokenizer_loader(path, temb_shape):
+def gguf_tokenizer_loader(reader, temb_shape):
     # convert gguf tokenizer to spiece
     logging.info("Attempting to recreate sentencepiece tokenizer from GGUF file metadata...")
     try:
@@ -343,11 +473,9 @@ def gguf_tokenizer_loader(path, temb_shape):
         raise ImportError("Please make sure sentencepiece and protobuf are installed.\npip install sentencepiece protobuf")
     spm = model.ModelProto()
 
-    reader = gguf.GGUFReader(path)
-
     if get_field(reader, "tokenizer.ggml.model", str) == "t5":
         if temb_shape == (256384, 4096): # probably UMT5
-            spm.trainer_spec.model_type == 1 # Unigram (do we have a T5 w/ BPE?)
+            spm.trainer_spec.model_type = 1 # Unigram (do we have a T5 w/ BPE?)
         else:
             raise NotImplementedError("Unknown model, can't set tokenizer!")
     else:
@@ -380,16 +508,16 @@ def gguf_tokenizer_loader(path, temb_shape):
 
     logging.info(f"Created tokenizer with vocab size of {len(spm.pieces)}")
     del reader
-    return torch.ByteTensor(list(spm.SerializeToString()))
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message="The given buffer is not writable")
+        return torch.frombuffer(spm.SerializeToString(), dtype=torch.uint8)
 
-def gguf_tekken_tokenizer_loader(path, temb_shape):
+def gguf_tekken_tokenizer_loader(reader, temb_shape):
     # convert ggml (hf) tokenizer metadata to tekken/comfy data
     logging.info("Attempting to recreate tekken tokenizer from GGUF file metadata...")
     import json
     import base64
     from transformers.convert_slow_tokenizer import bytes_to_unicode
-
-    reader = gguf.GGUFReader(path)
 
     model_str = get_field(reader, "tokenizer.ggml.model", str)
     if model_str == "gpt2":
@@ -423,9 +551,11 @@ def gguf_tekken_tokenizer_loader(path, temb_shape):
 
     logging.info(f"Created tekken tokenizer with vocab size of {len(data['vocab'])} (+{len(data['special_tokens'])})")
     del reader
-    return torch.ByteTensor(list(json.dumps(data).encode('utf-8')))
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message="The given buffer is not writable")
+        return torch.frombuffer(json.dumps(data).encode('utf-8'), dtype=torch.uint8)
 
-def gguf_gemma3_tokenizer_loader(path):
+def gguf_gemma3_tokenizer_loader(reader):
     #TODO: merge into gguf_tokenizer_loader
     logging.info("Attempting to recreate sentencepiece tokenizer from GGUF file metadata...")
     try:
@@ -433,7 +563,6 @@ def gguf_gemma3_tokenizer_loader(path):
     except ImportError:
         raise ImportError("Please install sentencepiece and protobuf.\npip install sentencepiece protobuf")
     spm = model.ModelProto()
-    reader = gguf.GGUFReader(path)
 
     spm.normalizer_spec.name = "identity"
     spm.normalizer_spec.add_dummy_prefix = False
@@ -465,42 +594,202 @@ def gguf_gemma3_tokenizer_loader(path):
     logging.info(f"Created tokenizer with vocab size of {len(spm.pieces)}")
     
     del reader
-    return torch.ByteTensor(list(spm.SerializeToString()))
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message="The given buffer is not writable")
+        return torch.frombuffer(spm.SerializeToString(), dtype=torch.uint8)
 
-def gguf_clip_loader(path):
-    sd, extra = gguf_sd_loader(path, is_text_model=True)
+def gguf_gemma4_tokenizer_loader(reader):
+    # convert gguf tokenizer to spiece
+    logging.info("Attempting to recreate tokenizer from GGUF file metadata...")
+    import json
+
+    tokens = get_list_field(reader, "tokenizer.ggml.tokens", str)
+    merges = get_list_field(reader, "tokenizer.ggml.merges", str)
+    del reader
+
+    if not tokens or not merges:
+        raise ValueError("Missing tokenizer metadata")
+
+    vocab = {token: idx for idx, token in enumerate(tokens)}
+    target_special_ids = [
+        0, 1, 2, 3, 4, 46, 47, 48, 49, 50, 51, 52, 98, 100, 101, 105, 106, 255999, 256000, 258880, 258881, 258882, 258883, 258884
+    ]
+    
+    added_tokens = []
+    for sp_id in target_special_ids:
+        if sp_id < len(tokens):
+            added_tokens.append({
+                "id": sp_id,
+                "content": tokens[sp_id],
+                "single_word": False,
+                "lstrip": False,
+                "rstrip": False,
+                "normalized": False,
+                "special": True
+            })
+
+    tokenizer_dict = {
+        "version": "1.0",
+        "truncation": None,
+        "padding": None,
+        "added_tokens": added_tokens,
+        "normalizer": {
+            "type": "Replace",
+            "pattern": {"String": " "},
+            "content": "\u2581"
+        },
+        "pre_tokenizer": {
+            "type": "Split",
+            "pattern": {"String": " "},
+            "behavior": "MergedWithPrevious",
+            "invert": False
+        },
+        "post_processor": {
+            "type": "TemplateProcessing",
+            "single": [{"Sequence": {"id": "A", "type_id": 0}}],
+            "pair": [
+                {"Sequence": {"id": "A", "type_id": 0}},
+                {"Sequence": {"id": "B", "type_id": 1}}
+            ],
+            "special_tokens": {}
+        },
+        "decoder": {
+            "type": "Sequence",
+            "decoders": [
+                {"type": "Replace", "pattern": {"String": "\u2581"}, "content": " "},
+                {"type": "ByteFallback"},
+                {"type": "Fuse"}
+            ]
+        },
+        "model": {
+            "type": "BPE",
+            "dropout": None,
+            "unk_token": "<unk>",
+            "continuing_subword_prefix": None,
+            "end_of_word_suffix": None,
+            "fuse_unk": True,
+            "byte_fallback": True,
+            "ignore_merges": False,
+            "vocab": vocab,
+            "merges": merges
+        }
+    }
+    
+    json_string = json.dumps(tokenizer_dict, ensure_ascii=False)
+    
+    logging.info(f"Created tokenizer with vocab size of {len(vocab)}")
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message="The given buffer is not writable")
+        return torch.frombuffer(json_string.encode('utf-8'), dtype=torch.uint8)
+
+def gguf_json_tokenizer_loader(path):
+    tenc_fname = os.path.basename(path)
+    tenc = os.path.splitext(tenc_fname)[0].lower()
+    tenc = strip_quant_suffix(tenc)
+
+    target = []
+    root = os.path.dirname(path)
+    for fname in os.listdir(root):
+        name, ext = os.path.splitext(fname)
+        if ext.lower() != ".json":
+            continue
+        if "tokenizer" not in name.lower():
+            continue
+        if tenc in name.lower():
+            target.append(fname)
+
+    if len(target) == 0:
+        logging.info(f"Can't find tokenizer file for '{tenc_fname}' (matching:'{tenc}')!")
+        return None
+    if len(target) > 1:
+        logging.info(f"Ambiguous tokenizer for text encoder '{tenc_fname}', will use first match.")
+
+    logging.info(f"Using tokenizer '{target[0]}' for text encoder '{tenc_fname}'.")
+    target = os.path.join(root, target[0])
+    
+    with open(target, "rb") as f:
+        tokenizer_bytes = f.read()  
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message="The given buffer is not writable")
+        return torch.frombuffer(tokenizer_bytes, dtype=torch.uint8)
+
+def gguf_clip_loader(path, dynamic=False):
+    sd, extra = gguf_sd_loader(path, is_text_model=True, dynamic=dynamic)
     arch = extra.get("arch_str", None)
     if arch in {"t5", "t5encoder"}:
         temb_key = "token_embd.weight"
         if temb_key in sd and sd[temb_key].shape == (256384, 4096):
             # non-standard Comfy-Org tokenizer
-            sd["spiece_model"] = gguf_tokenizer_loader(path, sd[temb_key].shape)
+            sd["spiece_model"] = gguf_tokenizer_loader(extra.pop("reader"), sd[temb_key].shape)
             # TODO: dequantizing token embed here is janky but otherwise we OOM due to tensor being massive.
             logging.warning(f"Dequantizing {temb_key} to prevent runtime OOM.")
             sd[temb_key] = dequantize_tensor(sd[temb_key], dtype=torch.float16)
         sd = sd_map_replace(sd, T5_SD_MAP)
-    elif arch in {"llama", "qwen2vl", "qwen3", "qwen3vl", "gemma3"}:
+    elif arch in {"llama", "qwen2vl", "qwen3", "qwen3vl", "gemma3", "gemma4"}:
         # TODO: pass model_options["vocab_size"] to loader somehow
         temb_key = "token_embd.weight"
         if temb_key in sd and sd[temb_key].shape[0] >= (64 * 1024):
             if arch == "llama" and sd[temb_key].shape == (131072, 5120):
                 # non-standard Comfy-Org tokenizer
-                sd["tekken_model"] = gguf_tekken_tokenizer_loader(path, sd[temb_key].shape)
+                sd["tekken_model"] = gguf_tekken_tokenizer_loader(extra.pop("reader"), sd[temb_key].shape)
             elif arch == "gemma3":
-                sd["spiece_model"] = gguf_gemma3_tokenizer_loader(path)
-            # See note above for T5.
-            logging.warning(f"Dequantizing {temb_key} to prevent runtime OOM.")
-            sd[temb_key] = dequantize_tensor(sd[temb_key], dtype=torch.float16)
+                sd["spiece_model"] = gguf_gemma3_tokenizer_loader(extra.pop("reader"))
+            if arch == "gemma4":
+                sd["tokenizer_json"] = gguf_gemma4_tokenizer_loader(extra.pop("reader"))
+            else:
+                # See note above for T5.
+                logging.warning(f"Dequantizing {temb_key} to prevent runtime OOM.")
+                sd[temb_key] = dequantize_tensor(sd[temb_key], dtype=torch.float16)
         if arch == "gemma3":
             sd = sd_map_replace(sd, GEMMA3_SD_MAP)
             sd = gemma3_norm_corrections(sd)
+        elif arch == "gemma4":
+            sd = sd_map_replace(sd, GEMMA4_SD_MAP)
+
+            # temporary workaround
+            sd["model.embed_tokens.weight"] = dequantize_tensor(sd["model.embed_tokens.weight"], dtype=torch.bfloat16)
+            sd["model.embed_tokens_per_layer.weight"] = dequantize_tensor(sd["model.embed_tokens_per_layer.weight"], dtype=torch.bfloat16).as_subclass(torch.Tensor)
+            sd["model.norm.weight"] = dequantize_tensor(sd["model.norm.weight"], dtype=torch.bfloat16)
         else:
             sd = sd_map_replace(sd, LLAMA_SD_MAP)
         if arch == "llama":
             sd = llama_permute(sd, 32, 8) # L3 / Mistral
-        if arch == "qwen2vl":
-            vsd = gguf_mmproj_loader(path)
+        if arch in {"qwen2vl", "qwen3vl", "gemma4"}:
+            vsd = gguf_mmproj_loader(path, dynamic=dynamic)
+
+        if vsd:
+        # MiniMax-H3 uses the truncated Qwen3-VL-32B encoder.
+        # ComfyUI detects it by:
+        #   visual.deepstack_merger_list...
+        #   model.layers.49...
+        #
+        # The generic Qwen3-VL mmproj mapper produces model.visual.*,
+        # which makes ComfyUI incorrectly instantiate Qwen3-VL-8B.
+            is_minimax_h3 = (
+                arch == "qwen3vl"
+                and "model.layers.49.self_attn.q_proj.weight" in sd
+            )
+
+            if is_minimax_h3:
+                vsd = {
+                    (
+                        key.replace("model.visual.", "visual.", 1)
+                        if key.startswith("model.visual.")
+                        else key
+                    ): value
+                    for key, value in vsd.items()
+                }
+
             sd.update(vsd)
+
+        elif arch == "qwen3vl" and "model.norm.weight" in sd:
+        # Generic full-model fallback only.
+            weight = sd["model.norm.weight"].shape[0]
+            sd["model.visual.deepstack_merger_list.0.norm.weight"] = torch.zeros(
+                4096 if weight < 4096 else 4608
+            )
+            sd["model.visual.merger.linear_fc2.weight"] = torch.zeros(weight)
     else:
         pass
     return sd
+
