@@ -74,8 +74,24 @@ class GGUFModelPatcher(comfy.model_patcher.ModelPatcher):
                 patches = getattr(p, "patches", [])
                 if len(patches) > 0:
                     p.patches = []
-        # TODO: Find another way to not unload after patches
-        return super().unpatch_model(device_to=device_to, unpatch_weights=unpatch_weights)
+            if device_to is not None and self.model.model_lowvram:
+                for m in self.model.modules():
+                    comfy.model_patcher.move_weight_functions(m, device_to)
+        # device_to=None makes base skip its nn.Module.to walk, which touches
+        # still-mmap'd quantized tensors (#444). The walk below only moves
+        # tensors that live on another device, so host-resident (possibly
+        # mmap-backed) memory is read at most, never written or remapped.
+        # Tracking upstream at Comfy-Org/ComfyUI#14142.
+        super().unpatch_model(device_to=None, unpatch_weights=unpatch_weights)
+        if unpatch_weights and device_to is not None:
+            device_to = torch.device(device_to)
+            for key, param in list(self.model.named_parameters(remove_duplicate=False)):
+                if param.device != device_to:
+                    comfy.utils.set_attr_param(self.model, key, param.to(device_to))
+            for key, buf in list(self.model.named_buffers(remove_duplicate=False)):
+                if buf.device != device_to:
+                    comfy.utils.set_attr(self.model, key, buf.to(device_to))
+            self.model.device = device_to
 
 
     def pin_weight_to_device(self, key):
