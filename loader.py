@@ -219,6 +219,50 @@ CLIP_VISION_SD_MAP = {
     "ln2.": "norm2.",
 }
 
+# Qwen3-VL vision tower (comfy/text_encoders/qwen35.py: Qwen35VisionModel).
+# Differs from Qwen2-VL: merger is {norm, linear_fc1, linear_fc2} (not {ln_q, mlp.0, mlp.2}),
+# blocks use a fused attn.qkv (not split attn_q/attn_k/attn_v) and mlp.linear_fc1/linear_fc2
+# (not mlp.up_proj/down_proj). Keys stay in HF `model.visual.*` layout so that
+# comfy.sd.detect_te_model() can identify Qwen3-VL via `model.visual.deepstack_merger_list.0.norm.weight`
+# before the KREA2/Qwen3-VL branch rewrites `model.visual.` -> `visual.`.
+CLIP_VISION_SD_MAP_QWEN3VL = {
+    "mm.0.": "model.visual.merger.linear_fc1.",
+    "mm.2.": "model.visual.merger.linear_fc2.",
+    "v.post_ln.": "model.visual.merger.norm.",
+    "v.patch_embd": "model.visual.patch_embed.proj",
+    "v.position_embd": "model.visual.pos_embed",
+    "v.blk.": "model.visual.blocks.",
+    "attn_qkv.": "attn.qkv.",
+    "attn_out.": "attn.proj.",
+    "ffn_up": "mlp.linear_fc1",
+    "ffn_down": "mlp.linear_fc2",
+    "ln1.": "norm1.",
+    "ln2.": "norm2.",
+}
+
+# GGUF indexes DeepStack mergers by their source vision layer number
+# (4B: [5, 11, 17]; 8B / 32B: [8, 16, 24]), ComfyUI expects a sequential list 0..N-1.
+QWEN3VL_DEEPSTACK_PROJ = {
+    "norm": "norm",
+    "fc1": "linear_fc1",
+    "fc2": "linear_fc2",
+}
+
+def qwen3vl_deepstack_remap(vsd):
+    ds_keys = [k for k in vsd if k.startswith("v.deepstack.")]
+    if not ds_keys:
+        logging.warning("Qwen3-VL mmproj has no DeepStack tensors - vision features will be degraded.")
+        return vsd
+    layer_ids = sorted({int(k.split(".")[2]) for k in ds_keys})
+    idx_of = {lid: i for i, lid in enumerate(layer_ids)}
+    for k in ds_keys:
+        # v.deepstack.{layer}.{norm|fc1|fc2}.{weight|bias}
+        _, _, layer, proj, tensor = k.split(".")
+        new_key = f"model.visual.deepstack_merger_list.{idx_of[int(layer)]}.{QWEN3VL_DEEPSTACK_PROJ[proj]}.{tensor}"
+        vsd[new_key] = vsd.pop(k)
+    logging.info(f"Qwen3-VL DeepStack: remapped vision layers {layer_ids} -> list index {list(range(len(layer_ids)))}.")
+    return vsd
+
 def sd_map_replace(raw_sd, key_map):
     sd = {}
     for k,v in raw_sd.items():
@@ -268,7 +312,7 @@ def strip_quant_suffix(name):
         name = name[:match.start()]
     return name
 
-def gguf_mmproj_loader(path):
+def gguf_mmproj_loader(path, arch=None):
     # Reverse version of Qwen2VLVisionModel.modify_tensors
     logging.info("Attenpting to find mmproj file for text encoder...")
 
@@ -304,6 +348,11 @@ def gguf_mmproj_loader(path):
         w1 = dequantize_tensor(vsd.pop("v.patch_embd.weight"), dtype=torch.float32)
         w2 = dequantize_tensor(vsd.pop("v.patch_embd.weight.1"), dtype=torch.float32)
         vsd["v.patch_embd.weight"] = torch.stack([w1, w2], dim=2)
+
+    if arch == "qwen3vl":
+        # Qwen3-VL: fused qkv + DeepStack, and a different merger layout than Qwen2-VL.
+        vsd = qwen3vl_deepstack_remap(vsd)
+        return sd_map_replace(vsd, CLIP_VISION_SD_MAP_QWEN3VL)
 
     # run main replacement
     vsd = sd_map_replace(vsd, CLIP_VISION_SD_MAP)
@@ -498,8 +547,8 @@ def gguf_clip_loader(path):
             sd = sd_map_replace(sd, LLAMA_SD_MAP)
         if arch == "llama":
             sd = llama_permute(sd, 32, 8) # L3 / Mistral
-        if arch == "qwen2vl":
-            vsd = gguf_mmproj_loader(path)
+        if arch in ("qwen2vl", "qwen3vl"):
+            vsd = gguf_mmproj_loader(path, arch=arch)
             sd.update(vsd)
     else:
         pass
