@@ -395,7 +395,7 @@ def gguf_tekken_tokenizer_loader(path, temb_shape):
     if model_str == "gpt2":
         if temb_shape == (131072, 5120): # probably Mistral
             data = {
-                "config": {"num_vocab_tokens": 150000, "default_vocab_size": 131072},
+                "config": {"num_vocab_tokens": 150000, "default_vocab_size": 131072, "default_num_special_tokens": 1000},
                 "vocab": [],
                 "special_tokens": [],
             }
