@@ -1,14 +1,30 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
 [project]
-name = "comfyui-gguf"
-description = "GGUF Quantization support for native ComfyUI models."
-version = "2.0.0" # 2.0.0 = GitHub main, 1.X.X = ComfyUI Registry
+name = "comfyui-gguf-reboot"
+version = "26.09.04"
+description = "Actively maintained fork of ComfyUI-GGUF node pack with support for new models, INT8/INT4 GGUFs and optionally ComfyUI Dynamic VRAM"
+readme = "README.md"
 license = { file = "LICENSE" }
-dependencies = ["gguf>=0.13.0", "sentencepiece", "protobuf"]
+authors = [
+    { name = "molbal" }
+]
+dependencies = [
+    "gguf>=0.13.0",
+    "torch",
+    "numpy",
+    "sentencepiece",
+    "protobuf",
+    "tqdm",
+]
 
 [project.urls]
-Repository = "https://github.com/city96/ComfyUI-GGUF"
+Repository = "https://github.com/molbal/ComfyUI-GGUF"
+Documentation = "https://github.com/molbal/ComfyUI-GGUF#readme"
 
 [tool.comfy]
-PublisherId = "city96"
-DisplayName = "ComfyUI-GGUF"
-Icon = ""
+PublisherId = "molbal"
+DisplayName = "ComfyUI GGUF (molbal's fork)"
+Icon = "https://raw.githubusercontent.com/molbal/ComfyUI-GGUF/refs/heads/main/icon.png"

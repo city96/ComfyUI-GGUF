@@ -1,5 +1,5 @@
 diff --git a/ggml/include/ggml.h b/ggml/include/ggml.h
-index de3c706f..0267c1fa 100644
+index de3c706fc..0267c1faa 100644
 --- a/ggml/include/ggml.h
 +++ b/ggml/include/ggml.h
 @@ -223,7 +223,7 @@
@@ -20,7 +20,7 @@ index de3c706f..0267c1fa 100644
      GGML_API void gguf_set_tensor_data(struct gguf_context * ctx, const char * name, const void * data, size_t size);
  
 diff --git a/ggml/src/ggml.c b/ggml/src/ggml.c
-index b16c462f..6d1568f1 100644
+index b16c462fa..6d1568f1b 100644
 --- a/ggml/src/ggml.c
 +++ b/ggml/src/ggml.c
 @@ -22960,6 +22960,14 @@ void gguf_add_tensor(
@@ -39,10 +39,10 @@ index b16c462f..6d1568f1 100644
      const int idx = gguf_find_tensor(ctx, name);
      if (idx < 0) {
 diff --git a/src/llama.cpp b/src/llama.cpp
-index 24e1f1f0..25db4c69 100644
+index 24e1f1f01..23df89523 100644
 --- a/src/llama.cpp
 +++ b/src/llama.cpp
-@@ -205,6 +205,17 @@ enum llm_arch {
+@@ -205,6 +205,18 @@ enum llm_arch {
      LLM_ARCH_GRANITE,
      LLM_ARCH_GRANITE_MOE,
      LLM_ARCH_CHAMELEON,
@@ -57,10 +57,11 @@ index 24e1f1f0..25db4c69 100644
 +    LLM_ARCH_HIDREAM,
 +    LLM_ARCH_COSMOS,
 +    LLM_ARCH_LUMINA2,
++    LLM_ARCH_KREA2,
      LLM_ARCH_UNKNOWN,
  };
  
-@@ -258,6 +269,17 @@ static const std::map<llm_arch, const char *> LLM_ARCH_NAMES = {
+@@ -258,6 +270,18 @@ static const std::map<llm_arch, const char *> LLM_ARCH_NAMES = {
      { LLM_ARCH_GRANITE,         "granite"      },
      { LLM_ARCH_GRANITE_MOE,     "granitemoe"   },
      { LLM_ARCH_CHAMELEON,       "chameleon"    },
@@ -75,10 +76,11 @@ index 24e1f1f0..25db4c69 100644
 +    { LLM_ARCH_HIDREAM,         "hidream"      },
 +    { LLM_ARCH_COSMOS,          "cosmos"       },
 +    { LLM_ARCH_LUMINA2,         "lumina2"      },
++    { LLM_ARCH_KREA2,           "krea2"        },
      { LLM_ARCH_UNKNOWN,         "(unknown)"    },
  };
  
-@@ -1531,6 +1553,17 @@ static const std::map<llm_arch, std::map<llm_tensor, const char *>> LLM_TENSOR_N
+@@ -1531,6 +1555,18 @@ static const std::map<llm_arch, std::map<llm_tensor, const char *>> LLM_TENSOR_N
              { LLM_TENSOR_ATTN_K_NORM,     "blk.%d.attn_k_norm" },
          },
      },
@@ -93,10 +95,11 @@ index 24e1f1f0..25db4c69 100644
 +    { LLM_ARCH_HIDREAM, {}},
 +    { LLM_ARCH_COSMOS,  {}},
 +    { LLM_ARCH_LUMINA2, {}},
++    { LLM_ARCH_KREA2,   {}},
      {
          LLM_ARCH_UNKNOWN,
          {
-@@ -5403,6 +5436,25 @@ static void llm_load_hparams(
+@@ -5403,6 +5439,26 @@ static void llm_load_hparams(
      // get general kv
      ml.get_key(LLM_KV_GENERAL_NAME, model.name, false);
  
@@ -113,6 +116,7 @@ index 24e1f1f0..25db4c69 100644
 +        case LLM_ARCH_HIDREAM:
 +        case LLM_ARCH_COSMOS:
 +        case LLM_ARCH_LUMINA2:
++        case LLM_ARCH_KREA2:
 +            model.ftype = ml.ftype;
 +            return;
 +        default:
@@ -122,7 +126,7 @@ index 24e1f1f0..25db4c69 100644
      // get hparams kv
      ml.get_key(LLM_KV_VOCAB_SIZE, hparams.n_vocab, false) || ml.get_arr_n(LLM_KV_TOKENIZER_LIST, hparams.n_vocab);
  
-@@ -18016,6 +18068,134 @@ static void llama_tensor_dequantize_internal(
+@@ -18016,6 +18072,135 @@ static void llama_tensor_dequantize_internal(
      workers.clear();
  }
  
@@ -158,6 +162,7 @@ index 24e1f1f0..25db4c69 100644
 +            (name.find(".v.weight") != std::string::npos) ||
 +            (name.find(".attn.w1v.weight") != std::string::npos) ||
 +            (name.find(".attn.w2v.weight") != std::string::npos) ||
++            (name.find(".attn.wv.weight") != std::string::npos) ||
 +            (name.find("_attn.v_proj.weight") != std::string::npos)
 +        ){
 +            if (ftype == LLAMA_FTYPE_MOSTLY_Q2_K) {
@@ -257,7 +262,7 @@ index 24e1f1f0..25db4c69 100644
  static ggml_type llama_tensor_get_type(quantize_state_internal & qs, ggml_type new_type, const ggml_tensor * tensor, llama_ftype ftype) {
      const std::string name = ggml_get_name(tensor);
  
-@@ -18513,7 +18693,9 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
+@@ -18513,7 +18698,9 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
          if (llama_model_has_encoder(&model)) {
              n_attn_layer *= 3;
          }
@@ -268,7 +273,7 @@ index 24e1f1f0..25db4c69 100644
      }
  
      size_t total_size_org = 0;
-@@ -18547,6 +18729,51 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
+@@ -18547,6 +18734,60 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
              ctx_outs[i_split] = gguf_init_empty();
          }
          gguf_add_tensor(ctx_outs[i_split], tensor);
@@ -317,10 +322,19 @@ index 24e1f1f0..25db4c69 100644
 +                LLAMA_LOG_INFO("\n%s: Correcting shape for Wan FLF2V: [key:%s]\n", __func__, tensor->name);
 +            }
 +        }
++        // Krea2's txtfusion.projector.weight has shape (1, 12) — leading dim of 1 gets truncated
++        if (model.arch == LLM_ARCH_KREA2) {
++            const std::string name = ggml_get_name(tensor);
++            if (name == "txtfusion.projector.weight" && tensor->ne[1] == 1) {
++                const int n_dim = 2;
++                gguf_set_tensor_ndim(ctx_outs[i_split], "txtfusion.projector.weight", n_dim);
++                LLAMA_LOG_INFO("\n%s: Correcting txtfusion.projector.weight shape for Krea2: [key:%s]\n", __func__, tensor->name);
++            }
++        }
      }
  
      // Set split info if needed
-@@ -18647,6 +18874,110 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
+@@ -18647,6 +18888,119 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
          // do not quantize relative position bias (T5)
          quantize &= name.find("attn_rel_b.weight") == std::string::npos;
  
@@ -423,6 +437,15 @@ index 24e1f1f0..25db4c69 100644
 +            quantize &= name.find("context_refiner.") == std::string::npos;
 +            quantize &= name.find("noise_refiner.") == std::string::npos;
 +        }
++        if (model.arch == LLM_ARCH_KREA2) {
++            image_model = true;
++            quantize &= name.find("first.") == std::string::npos;
++            quantize &= name.find("last.") == std::string::npos;
++            quantize &= name.find("tproj.") == std::string::npos;
++            quantize &= name.find("tmlp.") == std::string::npos;
++            quantize &= name.find("txtmlp.") == std::string::npos;
++            quantize &= name.find("txtfusion.projector.") == std::string::npos;
++        }
 +        // ignore 3D/4D tensors for image models as the code was never meant to handle these
 +        if (image_model) {
 +            quantize &= ggml_n_dims(tensor) == 2;
@@ -431,7 +454,7 @@ index 24e1f1f0..25db4c69 100644
          enum ggml_type new_type;
          void * new_data;
          size_t new_size;
-@@ -18655,6 +18986,9 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
+@@ -18655,6 +19009,9 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
              new_type = default_type;
  
              // get more optimal quantization type based on the tensor shape, layer, etc.
@@ -441,7 +464,7 @@ index 24e1f1f0..25db4c69 100644
              if (!params->pure && ggml_is_quantized(default_type)) {
                  new_type = llama_tensor_get_type(qs, new_type, tensor, ftype);
              }
-@@ -18664,6 +18998,7 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
+@@ -18664,6 +19021,7 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
              if (params->output_tensor_type < GGML_TYPE_COUNT && strcmp(tensor->name, "output.weight") == 0) {
                  new_type = params->output_tensor_type;
              }
