@@ -145,8 +145,14 @@ class ModelLumina2(ModelTemplate):
         ("cap_embedder.1.weight", "context_refiner.0.attention.qkv.weight")
     ]
 
-arch_list = [ModelFlux, ModelSD3, ModelAura, ModelHiDream, CosmosPredict2, 
-             ModelLTXV, ModelHyVid, ModelWan, ModelSDXL, ModelSD1, ModelLumina2]
+class ModelMiniMaxH3(ModelTemplate):
+    arch = "minimax_h3"
+    keys_detect = [
+        ("adaln_t_table", "blocks.0.adaln_proj.linear.weight", "blocks.0.attn.qkv_proj.weight")
+    ]
+
+arch_list = [ModelFlux, ModelSD3, ModelAura, ModelHiDream, CosmosPredict2,
+             ModelLTXV, ModelHyVid, ModelWan, ModelSDXL, ModelSD1, ModelLumina2, ModelMiniMaxH3]
 
 def is_model_arch(model, state_dict):
     # check if model is correct
