@@ -9,7 +9,7 @@ import os
 from .ops import GGMLTensor
 from .dequant import is_quantized, dequantize_tensor
 
-IMG_ARCH_LIST = {"flux", "sd1", "sdxl", "sd3", "aura", "hidream", "cosmos", "ltxv", "hyvid", "wan", "lumina2", "qwen_image"}
+IMG_ARCH_LIST = {"flux", "sd1", "sdxl", "sd3", "aura", "hidream", "cosmos", "ltxv", "hyvid", "wan", "lumina2", "qwen_image", "minimax_h3"}
 TXT_ARCH_LIST = {"t5", "t5encoder", "llama", "qwen2vl", "qwen3", "qwen3vl", "gemma3"}
 VIS_TYPE_LIST = {"clip-vision", "mmproj"}
 
@@ -219,6 +219,21 @@ CLIP_VISION_SD_MAP = {
     "ln2.": "norm2.",
 }
 
+QWEN3_VISION_SD_MAP = {
+    "mm.0.": "visual.merger.linear_fc1.",
+    "mm.2.": "visual.merger.linear_fc2.",
+    "v.post_ln.": "visual.merger.norm.",
+    "v.patch_embd": "visual.patch_embed.proj",
+    "v.position_embd.": "visual.pos_embed.",
+    "v.blk.": "visual.blocks.",
+    "ffn_up": "mlp.linear_fc1",
+    "ffn_down": "mlp.linear_fc2",
+    "attn_qkv.": "attn.qkv.",
+    "attn_out.": "attn.proj.",
+    "ln1.": "norm1.",
+    "ln2.": "norm2.",
+}
+
 def sd_map_replace(raw_sd, key_map):
     sd = {}
     for k,v in raw_sd.items():
@@ -290,7 +305,7 @@ def gguf_mmproj_loader(path):
             target.append(fname)
 
     if len(target) == 0:
-        logging.error(f"Error: Can't find mmproj file for '{tenc_fname}' (matching:'{tenc}')! Qwen-Image-Edit will be broken!")
+        logging.warning(f"No matching mmproj found for '{tenc_fname}' (matching: '{tenc}').")
         return {}
     if len(target) > 1:
         logging.error(f"Ambiguous mmproj for text encoder '{tenc_fname}', will use first match.")
@@ -305,8 +320,16 @@ def gguf_mmproj_loader(path):
         w2 = dequantize_tensor(vsd.pop("v.patch_embd.weight.1"), dtype=torch.float32)
         vsd["v.patch_embd.weight"] = torch.stack([w1, w2], dim=2)
 
-    # run main replacement
-    vsd = sd_map_replace(vsd, CLIP_VISION_SD_MAP)
+    # DeepStack tensors use vision block indices, not merger indices.
+    deepstack_blocks = sorted({int(k.split(".")[2]) for k in vsd if k.startswith("v.deepstack.")})
+    if deepstack_blocks:
+        key_map = QWEN3_VISION_SD_MAP.copy()
+        for i, block in enumerate(deepstack_blocks):
+            for src, dst in (("norm", "norm"), ("fc1", "linear_fc1"), ("fc2", "linear_fc2")):
+                key_map[f"v.deepstack.{block}.{src}."] = f"visual.deepstack_merger_list.{i}.{dst}."
+        vsd = sd_map_replace(vsd, key_map)
+    else:
+        vsd = sd_map_replace(vsd, CLIP_VISION_SD_MAP)
 
     # handle split Q/K/V
     if "visual.blocks.0.attn_q.weight" in vsd:
@@ -498,8 +521,17 @@ def gguf_clip_loader(path):
             sd = sd_map_replace(sd, LLAMA_SD_MAP)
         if arch == "llama":
             sd = llama_permute(sd, 32, 8) # L3 / Mistral
-        if arch == "qwen2vl":
+        if arch in {"qwen2vl", "qwen3vl"}:
             vsd = gguf_mmproj_loader(path)
+            if arch == "qwen3vl":
+                norm = sd.get("model.layers.0.post_attention_layernorm.weight")
+                if norm is not None and norm.shape[0] == 5120:
+                    if not vsd:
+                        raise ValueError(f"Missing Qwen3-VL mmproj for {os.path.basename(path)!r}; place the matching mmproj GGUF beside the text encoder.")
+                elif vsd:
+                    # ComfyUI detects the smaller Qwen3-VL encoders in HF layout.
+                    sd = {k.replace("model.", "model.language_model.", 1) if k.startswith("model.") else k: v for k, v in sd.items()}
+                    vsd = {"model." + k: v for k, v in vsd.items()}
             sd.update(vsd)
     else:
         pass

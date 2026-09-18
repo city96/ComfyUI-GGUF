@@ -145,8 +145,15 @@ class ModelLumina2(ModelTemplate):
         ("cap_embedder.1.weight", "context_refiner.0.attention.qkv.weight")
     ]
 
+class ModelMiniMaxH3(ModelTemplate):
+    arch = "minimax_h3"
+    keys_detect = [
+        ("video_patch_proj.weight", "audio_patch_proj.weight", "final_layer.video_out.weight", "final_layer.audio_out.weight"),
+    ]
+    keys_hiprec = ["adaln_t_table", "rope.inv_freq"]
+
 arch_list = [ModelFlux, ModelSD3, ModelAura, ModelHiDream, CosmosPredict2, 
-             ModelLTXV, ModelHyVid, ModelWan, ModelSDXL, ModelSD1, ModelLumina2]
+             ModelLTXV, ModelHyVid, ModelWan, ModelSDXL, ModelSD1, ModelLumina2, ModelMiniMaxH3]
 
 def is_model_arch(model, state_dict):
     # check if model is correct
