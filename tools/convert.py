@@ -145,8 +145,16 @@ class ModelLumina2(ModelTemplate):
         ("cap_embedder.1.weight", "context_refiner.0.attention.qkv.weight")
     ]
 
-arch_list = [ModelFlux, ModelSD3, ModelAura, ModelHiDream, CosmosPredict2, 
-             ModelLTXV, ModelHyVid, ModelWan, ModelSDXL, ModelSD1, ModelLumina2]
+class ModelQwenImage(ModelTemplate):
+    arch = "qwen_image"
+    keys_detect = [
+        ("img_in.weight", "modulation.1.weight"),
+        ("img_in.weight", "img_mlp.gate_layer.weight"),
+    ]
+
+arch_list = [ModelFlux, ModelSD3, ModelAura, ModelHiDream, CosmosPredict2,
+             ModelLTXV, ModelHyVid, ModelWan, ModelSDXL, ModelSD1, ModelLumina2,
+             ModelQwenImage]
 
 def is_model_arch(model, state_dict):
     # check if model is correct
