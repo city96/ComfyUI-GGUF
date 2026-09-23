@@ -15,6 +15,7 @@ import folder_paths
 
 from .ops import GGMLOps, move_patch_to_device
 from .loader import gguf_sd_loader, gguf_clip_loader
+from .ming_image import convert_ming_image_diffusers_gguf
 from .dequant import is_quantized, is_torch_compatible
 
 def update_folder_names_and_paths(key, targets=[]):
@@ -167,6 +168,17 @@ class UnetLoaderGGUF:
         # init model
         unet_path = folder_paths.get_full_path("unet", unet_name)
         sd, extra = gguf_sd_loader(unet_path)
+
+        # Ming-Image stores split Q/K/V tensors. For quantized GGUF tensors,
+        # merge them while preserving packed storage and logical tensor shapes.
+        if (
+            "all_x_embedder.2-1.weight" in sd
+            and "all_final_layer.2-1.linear.weight" in sd
+            and "noise_refiner.0.attention.to_q.weight" in sd
+            and "layers.0.attention.to_q.weight" in sd
+            and any(is_quantized(value) for value in sd.values())
+        ):
+            sd = convert_ming_image_diffusers_gguf(sd)
 
         kwargs = {}
         valid_params = inspect.signature(comfy.sd.load_diffusion_model_state_dict).parameters
