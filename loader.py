@@ -334,6 +334,23 @@ def gguf_mmproj_loader(path):
 
     return vsd
 
+def qwen3vl_vision_remap(vsd):
+    # Qwen3-VL vision tower: map qwen2vl-style names from gguf_mmproj_loader to comfy's Qwen3-VL keys
+    ds = sorted({int(k.split(".")[2]) for k in vsd if k.startswith("v.deepstack.")})
+    out = {}
+    for k, v in vsd.items():
+        if k.startswith("v.deepstack."):
+            _, _, n, rest = k.split(".", 3)
+            k = f"visual.deepstack_merger_list.{ds.index(int(n))}.{rest}"
+        k = k.replace("v.position_embd.", "visual.pos_embed.")
+        k = k.replace(".attn_qkv.", ".attn.qkv.")
+        k = k.replace(".mlp.up_proj.", ".mlp.linear_fc1.").replace(".mlp.down_proj.", ".mlp.linear_fc2.")
+        k = k.replace(".fc1.", ".linear_fc1.").replace(".fc2.", ".linear_fc2.")
+        k = k.replace("visual.merger.ln_q.", "visual.merger.norm.")
+        k = k.replace("visual.merger.mlp.0.", "visual.merger.linear_fc1.").replace("visual.merger.mlp.2.", "visual.merger.linear_fc2.")
+        out["model." + k] = v
+    return out
+
 def gguf_tokenizer_loader(path, temb_shape):
     # convert gguf tokenizer to spiece
     logging.info("Attempting to recreate sentencepiece tokenizer from GGUF file metadata...")
@@ -498,8 +515,10 @@ def gguf_clip_loader(path):
             sd = sd_map_replace(sd, LLAMA_SD_MAP)
         if arch == "llama":
             sd = llama_permute(sd, 32, 8) # L3 / Mistral
-        if arch == "qwen2vl":
+        if arch in {"qwen2vl", "qwen3vl"}:
             vsd = gguf_mmproj_loader(path)
+            if arch == "qwen3vl":
+                vsd = qwen3vl_vision_remap(vsd)
             sd.update(vsd)
     else:
         pass
