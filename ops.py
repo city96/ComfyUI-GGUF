@@ -1,4 +1,6 @@
 # (c) City96 || Apache-2.0 (apache.org/licenses/LICENSE-2.0)
+import contextlib
+
 import gguf
 import torch
 import logging
@@ -224,6 +226,90 @@ class GGMLLayer(torch.nn.Module):
     def forward_ggml_cast_weights(self, input):
         raise NotImplementedError
 
+class GGMLMoEExperts(GGMLLayer):
+    """Container for a bank of MoE expert weights, following the interface of
+    comfy.ops MoEExperts (bank_resident + expert_linear), dequantizing on the fly.
+
+    The packed bank is a single GGMLTensor with logical shape
+    [num_experts, out_features, in_features]. Experts are contiguous in the
+    packed buffer, so a single expert can be dequantized by slicing its byte
+    range and dequantizing it as a 2D matrix.
+    """
+    comfy_cast_weights = True
+
+    def __init__(self, num_experts, in_features, out_features, bias=False, device=None, dtype=None):
+        torch.nn.Module.__init__(self)
+        self.num_experts = num_experts
+        self.in_features = in_features
+        self.out_features = out_features
+        self._orig_shape = (num_experts, out_features, in_features)
+        self.weight = None
+        self.bias = None
+        self._resident_bank = None
+
+    def reset_parameters(self):
+        return None
+
+    def _bank_shape(self):
+        shape = getattr(self.weight, "tensor_shape", None)
+        if shape is None:
+            shape = self.weight.shape
+        if len(shape) < 3:
+            raise ValueError(f"MoEExperts weight must be a 3D [num_experts, out_features, in_features] bank, got {tuple(shape)}")
+        num_experts, out_features, in_features = (int(v) for v in shape[:3])
+        if num_experts != self.num_experts:
+            raise ValueError(f"MoEExperts num_experts mismatch: bank has {num_experts}, layer created with {self.num_experts}")
+        if out_features != self.out_features or in_features != self.in_features:
+            raise ValueError(f"MoEExperts shape mismatch: bank is [{num_experts}, {out_features}, {in_features}], layer created with [{self.num_experts}, {self.out_features}, {self.in_features}]")
+        return num_experts, out_features, in_features
+
+    def expert_weight(self, i, input=None):
+        """Dequantize a single expert's weight ([out_features, in_features])."""
+        num_experts, out_features, in_features = self._bank_shape()
+        data = self.weight.data.reshape(-1)
+        per = data.numel() // num_experts
+        if per * num_experts != data.numel():
+            raise ValueError("MoEExperts packed size is not divisible by num_experts")
+        sub = GGMLTensor(
+            data.narrow(0, i * per, per),
+            tensor_type=self.weight.tensor_type,
+            tensor_shape=torch.Size((out_features, in_features)),
+            patches=getattr(self.weight, "patches", []),
+        )
+        dtype = input.dtype if input is not None else None
+        device = input.device if input is not None else None
+        out = dequantize_tensor(sub, dtype)
+        return out.to(device) if device is not None else out
+
+    @contextlib.contextmanager
+    def bank_resident(self, input):
+        """Dequantize the full expert bank once; expert_linear inside reuses it."""
+        weight, bias = self.cast_bias_weight(input)
+        if isinstance(weight, GGMLTensor):
+            weight = torch.Tensor(weight)
+        self._resident_bank = (weight, bias)
+        try:
+            yield self
+        finally:
+            self._resident_bank = None
+
+    def expert_linear(self, input, i):
+        resident = self._resident_bank
+        if resident is not None:
+            weight, bias = resident
+            b = bias[i] if bias is not None else None
+            return torch.nn.functional.linear(input, weight[i], b)
+        # No context manager: dequantize only the requested expert
+        weight = self.expert_weight(i, input=input)
+        bias = None
+        if self.bias is not None:
+            bias = self.get_weight(self.bias.to(input.device), input.dtype)
+            if isinstance(bias, GGMLTensor):
+                bias = torch.Tensor(bias)
+            bias = bias[i]
+        return torch.nn.functional.linear(input, weight, bias)
+
+
 class GGMLOps(comfy.ops.manual_cast):
     """
     Dequantize weights on the fly before doing the compute
@@ -269,6 +355,8 @@ class GGMLOps(comfy.ops.manual_cast):
         def forward_ggml_cast_weights(self, input):
             weight, bias = self.cast_bias_weight(input)
             return torch.nn.functional.group_norm(input, self.num_groups, weight, bias, self.eps)
+
+    MoEExperts = GGMLMoEExperts
 
 def move_patch_to_device(item, device):
     if isinstance(item, torch.Tensor):
