@@ -469,6 +469,17 @@ def gguf_gemma3_tokenizer_loader(path):
 
 def gguf_clip_loader(path):
     sd, extra = gguf_sd_loader(path, is_text_model=True)
+    # Some quantizers store the HF tokenizer.json as a single F32 tensor with one
+    # float value per byte instead of a byte tensor. Convert it to a uint8 byte
+    # tensor so consumers can decode it directly as utf-8.
+    tj = sd.get("tokenizer_json", None)
+    if tj is not None and getattr(tj, "tensor_type", None) == gguf.GGMLQuantizationType.F32:
+        import numpy as np
+        vals = tj.data.detach().cpu().numpy().reshape(-1)
+        if vals.dtype != np.float32:
+            raise ValueError(f"tokenizer_json has unexpected dtype {vals.dtype}")
+        data = np.floor(vals).astype(np.uint8).tobytes()
+        sd["tokenizer_json"] = torch.frombuffer(bytearray(data), dtype=torch.uint8)
     arch = extra.get("arch_str", None)
     if arch in {"t5", "t5encoder"}:
         temb_key = "token_embd.weight"
