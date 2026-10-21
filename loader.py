@@ -6,7 +6,7 @@ import gguf
 import re
 import os
 
-from .ops import GGMLTensor
+from .ops import GGMLTensor, GGUFFileSource
 from .dequant import is_quantized, dequantize_tensor
 
 IMG_ARCH_LIST = {"flux", "sd1", "sdxl", "sd3", "aura", "hidream", "cosmos", "ltxv", "hyvid", "wan", "lumina2", "qwen_image"}
@@ -71,7 +71,12 @@ def gguf_sd_loader(path, handle_prefix="model.diffusion_model.", is_text_model=F
     """
     Read state dict as fake tensors
     """
-    reader = gguf.GGUFReader(path)
+    source = GGUFFileSource(path)
+    try:
+        reader = gguf.GGUFReader(source.mapping_path)
+    except Exception:
+        source.close()
+        raise
 
     # filter and strip prefix
     has_prefix = False
@@ -137,6 +142,8 @@ def gguf_sd_loader(path, handle_prefix="model.diffusion_model.", is_text_model=F
         if tensor.tensor_type in {gguf.GGMLQuantizationType.F32, gguf.GGMLQuantizationType.F16}:
             torch_tensor = torch_tensor.view(*shape)
         state_dict[sd_key] = GGMLTensor(torch_tensor, tensor_type=tensor.tensor_type, tensor_shape=shape)
+        state_dict[sd_key].set_file_source(source, tensor.data_offset, tensor.n_bytes,
+                                            readonly=not tensor.data.flags.writeable)
 
         # 1D tensors shouldn't be quantized, this is a fix for BF16
         if len(shape) <= 1 and tensor.tensor_type == gguf.GGMLQuantizationType.BF16:

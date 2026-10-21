@@ -2,6 +2,10 @@
 import gguf
 import torch
 import logging
+import os
+import sys
+import threading
+import weakref
 
 import comfy.ops
 import comfy.lora
@@ -41,10 +45,43 @@ def get_torch_compiler_disable_decorator():
 
 torch_compiler_disable = get_torch_compiler_disable_decorator()
 
+class _GGUFStagingBuffers:
+    def __init__(self, device):
+        self.lock = threading.Lock()
+        self.buffers = [torch.empty(8 * 1024 * 1024, dtype=torch.uint8, pin_memory=True) for _ in range(2)]
+        self.views = [memoryview(buffer.numpy()) for buffer in self.buffers]
+        self.events = [torch.cuda.Event() for _ in range(2)]
+        self.stream = torch.cuda.Stream(device=device)
+
+GGUF_STREAM_TO_GPU = os.environ.get("COMFYUI_GGUF_STREAM_TO_GPU") == "1"
+MIN_STREAM_BYTES = 8 * 1024 * 1024
+_gguf_stagers = {}
+_gguf_stagers_lock = threading.Lock()
+
+def _gguf_stager(device):
+    with _gguf_stagers_lock:
+        if device not in _gguf_stagers:
+            try:
+                _gguf_stagers[device] = _GGUFStagingBuffers(device)
+            except RuntimeError as error:
+                logging.warning("GGUF pinned staging unavailable on %s: %s", device, error)
+                _gguf_stagers[device] = None
+        return _gguf_stagers[device]
+
+class GGUFFileSource:
+    def __init__(self, path):
+        self.fd = os.open(path, os.O_RDONLY)
+        self.mapping_path = f"/proc/self/fd/{self.fd}" if sys.platform.startswith("linux") else path
+        self._close = weakref.finalize(self, os.close, self.fd)
+
+    def close(self):
+        self._close()
+
 class GGMLTensor(torch.Tensor):
     """
     Main tensor-like class for storing quantized weights
     """
+    streamed_bytes = 0
     def __init__(self, *args, tensor_type, tensor_shape, patches=[], **kwargs):
         super().__init__()
         self.tensor_type = tensor_type
@@ -54,12 +91,71 @@ class GGMLTensor(torch.Tensor):
     def __new__(cls, *args, tensor_type, tensor_shape, patches=[], **kwargs):
         return super().__new__(cls, *args, **kwargs)
 
+    def set_file_source(self, source, offset, size, readonly):
+        self.file_source = (source, offset, size)
+        self.file_source_data_ptr = self.data_ptr()
+        self.file_source_readonly = readonly
+        self.file_source_version = None if self.is_inference() else self._version
+
+    def current_file_source(self):
+        source = getattr(self, "file_source", None)
+        if source is None or self.data_ptr() != getattr(self, "file_source_data_ptr", None):
+            return None
+        version = getattr(self, "file_source_version", None)
+        if version is None:
+            return source if self.is_inference() and self.file_source_readonly else None
+        return source if not self.is_inference() and self._version == version else None
+
     def to(self, *args, **kwargs):
-        new = super().to(*args, **kwargs)
+        target = kwargs.get("device", args[0] if args else None)
+        target = torch.device(target) if isinstance(target, (str, torch.device)) else None
+        dtype = kwargs.get("dtype", args[1] if len(args) > 1 and isinstance(args[1], torch.dtype) else None)
+        source = self.current_file_source() if GGUF_STREAM_TO_GPU else None
+        if source and source[2] >= MIN_STREAM_BYTES and hasattr(os, "preadv") and self.device.type == "cpu" \
+                and target is not None and target.type == "cuda" \
+                and (dtype is None or dtype == self.dtype) and kwargs.get("memory_format") is None:
+            stager = _gguf_stager(target)
+            new = self._stream_to_device(target, source, stager) if stager is not None else super().to(*args, **kwargs)
+        else:
+            new = super().to(*args, **kwargs)
         new.tensor_type = getattr(self, "tensor_type", None)
         new.tensor_shape = getattr(self, "tensor_shape", new.data.shape)
         new.patches = getattr(self, "patches", []).copy()
         return new
+
+    def _stream_to_device(self, device, source, stager):
+        file, offset, size = source
+        chunk_size = 8 * 1024 * 1024
+        tensor = torch.empty(self.size(), dtype=self.dtype, device=device)
+        destination = tensor.view(torch.uint8).flatten()
+        if destination.numel() != size:
+            raise ValueError("GGUF tensor byte count differs from file metadata")
+        with stager.lock:
+            stager.stream.wait_stream(torch.cuda.current_stream(device))
+            position = 0
+            used = [False, False]
+            while position < size:
+                slot = (position // chunk_size) % 2
+                if used[slot]:
+                    stager.events[slot].synchronize()
+                count = min(chunk_size, size - position)
+                filled = 0
+                while filled < count:
+                    received = os.preadv(file.fd, [stager.views[slot][filled:count]], offset + position + filled)
+                    if received == 0:
+                        raise EOFError("GGUF tensor ended during GPU upload")
+                    filled += received
+                with torch.cuda.stream(stager.stream):
+                    destination[position:position + count].copy_(stager.buffers[slot][:count], non_blocking=True)
+                    stager.events[slot].record(stager.stream)
+                used[slot] = True
+                position += count
+            stager.stream.synchronize()
+        previous_gib = GGMLTensor.streamed_bytes // (1 << 30)
+        GGMLTensor.streamed_bytes += size
+        if GGMLTensor.streamed_bytes // (1 << 30) > previous_gib:
+            logging.info("GGUF streamed %.1f GiB to GPU", GGMLTensor.streamed_bytes / (1 << 30))
+        return GGMLTensor(tensor, tensor_type=self.tensor_type, tensor_shape=self.tensor_shape)
 
     def clone(self, *args, **kwargs):
         return self

@@ -33,6 +33,8 @@ On MacOS sequoia, torch 2.4.1 seems to be required, as 2.6.X nightly versions ca
 
 Simply use the GGUF Unet loader found under the `bootleg` category. Place the .gguf model files in your `ComfyUI/models/unet` folder.
 
+Experimental GPU streaming is available by setting `COMFYUI_GGUF_STREAM_TO_GPU=1` before starting ComfyUI. On systems with `preadv` and CUDA or ROCm, it reads unchanged GGUF tensors of at least 8 MiB through two pinned buffers instead of faulting the mmap during transfer. It is off by default: cached files and fast storage can be slower with streaming. Compare cold and warm loads on your own workflow before enabling it routinely.
+
 LoRA loading is experimental but it should work with just the built-in LoRA loader node(s).
 
 Pre-quantized models:
