@@ -10,7 +10,7 @@ from .ops import GGMLTensor
 from .dequant import is_quantized, dequantize_tensor
 
 IMG_ARCH_LIST = {"flux", "sd1", "sdxl", "sd3", "aura", "hidream", "cosmos", "ltxv", "hyvid", "wan", "lumina2", "qwen_image"}
-TXT_ARCH_LIST = {"t5", "t5encoder", "llama", "qwen2vl", "qwen3", "qwen3vl", "gemma3"}
+TXT_ARCH_LIST = {"t5", "t5encoder", "llama", "qwen2vl", "qwen3", "qwen3vl", "qwen35", "gemma3"}
 VIS_TYPE_LIST = {"clip-vision", "mmproj"}
 
 def get_orig_shape(reader, tensor_name):
@@ -206,6 +206,33 @@ GEMMA3_SD_MAP.update({
     "post_attention_norm": "post_attention_layernorm",
 })
 
+QWEN35_SD_MAP = {
+    "blk.": "model.language_model.layers.",
+    "attn_norm": "input_layernorm",
+    "post_attention_norm": "post_attention_layernorm",
+    "attn_q_norm.": "self_attn.q_norm.",
+    "attn_k_norm.": "self_attn.k_norm.",
+    "attn_qkv": "linear_attn.in_proj_qkv",
+    "attn_gate": "linear_attn.in_proj_z",
+    "attn_q.": "self_attn.q_proj.",
+    "attn_k.": "self_attn.k_proj.",
+    "attn_v.": "self_attn.v_proj.",
+    "attn_output": "self_attn.o_proj",
+    "ssm_alpha": "linear_attn.in_proj_a",
+    "ssm_beta": "linear_attn.in_proj_b",
+    "ssm_out": "linear_attn.out_proj",
+    "ssm_norm": "linear_attn.norm",
+    "ssm_conv1d": "linear_attn.conv1d",
+    "ssm_dt.bias": "linear_attn.dt_bias",
+    "ssm_a": "linear_attn.A_log",
+    "ffn_up": "mlp.up_proj",
+    "ffn_down": "mlp.down_proj",
+    "ffn_gate": "mlp.gate_proj",
+    "token_embd": "model.language_model.embed_tokens",
+    "output_norm": "model.language_model.norm",
+    "output.weight": "lm_head.weight",
+}
+
 CLIP_VISION_SD_MAP = {
     "mm.": "visual.merger.mlp.",
     "v.post_ln.": "visual.merger.ln_q.",
@@ -259,6 +286,37 @@ def gemma3_norm_corrections(sd):
                 sd[key] = sd[key].float() - 1.0
             corrected += 1
     #logging.info(f"Gemma3: Applied -1 norm correction to {corrected} tensors")
+    return sd
+
+def qwen35_corrections(sd, num_k_heads):
+    # Reverse changes from Qwen3NextModel / _LinearAttentionVReorderBase modify_tensors in llama.cpp convert script
+    plain = lambda x: dequantize_tensor(x, dtype=torch.float32).as_subclass(torch.Tensor)
+    for key in list(sd.keys()):
+        if key.endswith("norm.weight") and not key.endswith("linear_attn.norm.weight"):
+            sd[key] = plain(sd[key]) - 1.0
+        elif key.endswith("linear_attn.A_log"):
+            sd[key] = torch.log(-plain(sd[key]))
+        elif key.endswith("linear_attn.conv1d.weight"):
+            sd[key] = plain(sd[key]).unsqueeze(1)
+
+    # V heads were reordered from grouped (by K head) to tiled order, undo it
+    for key in [k for k in sd.keys() if k.endswith("linear_attn.A_log")]:
+        prefix = key[:-len("A_log")]
+        num_v_heads = sd[key].shape[0]
+        head_v_dim = sd[f"{prefix}norm.weight"].shape[0]
+        perm = lambda d: torch.arange(num_v_heads * d).reshape(num_v_heads // num_k_heads, num_k_heads, d).transpose(0, 1).flatten()
+        v_perm = perm(head_v_dim)
+
+        # V is the tail of qkv / conv1d and all of z. Rows can be permuted on quantized data directly
+        for name in ("in_proj_qkv.weight", "conv1d.weight", "in_proj_z.weight"):
+            t = sd[f"{prefix}{name}"]
+            offset = t.shape[0] - v_perm.shape[0]
+            t.data = t.data[torch.cat([torch.arange(offset), offset + v_perm])]
+        for name in ("in_proj_a.weight", "in_proj_b.weight", "A_log", "dt_bias"):
+            t = sd[f"{prefix}{name}"]
+            t.data = t.data[perm(1)]
+        # columns can't be permuted inside quantized blocks
+        sd[f"{prefix}out_proj.weight"] = dequantize_tensor(sd[f"{prefix}out_proj.weight"], dtype=torch.float16)[:, v_perm]
     return sd
 
 def strip_quant_suffix(name):
@@ -479,7 +537,7 @@ def gguf_clip_loader(path):
             logging.warning(f"Dequantizing {temb_key} to prevent runtime OOM.")
             sd[temb_key] = dequantize_tensor(sd[temb_key], dtype=torch.float16)
         sd = sd_map_replace(sd, T5_SD_MAP)
-    elif arch in {"llama", "qwen2vl", "qwen3", "qwen3vl", "gemma3"}:
+    elif arch in {"llama", "qwen2vl", "qwen3", "qwen3vl", "qwen35", "gemma3"}:
         # TODO: pass model_options["vocab_size"] to loader somehow
         temb_key = "token_embd.weight"
         if temb_key in sd and sd[temb_key].shape[0] >= (64 * 1024):
@@ -494,6 +552,9 @@ def gguf_clip_loader(path):
         if arch == "gemma3":
             sd = sd_map_replace(sd, GEMMA3_SD_MAP)
             sd = gemma3_norm_corrections(sd)
+        elif arch == "qwen35":
+            sd = sd_map_replace(sd, QWEN35_SD_MAP)
+            sd = qwen35_corrections(sd, get_field(gguf.GGUFReader(path), "qwen35.ssm.group_count", int))
         else:
             sd = sd_map_replace(sd, LLAMA_SD_MAP)
         if arch == "llama":
