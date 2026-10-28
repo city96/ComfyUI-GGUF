@@ -268,6 +268,53 @@ def strip_quant_suffix(name):
         name = name[:match.start()]
     return name
 
+def qwen3vl_vision_fixup(vsd, path=None):
+    # Qwen3-VL (MiniMax H3) mmproj specifics:
+    #  - deepstack mergers are keyed by vision block index (v.deepstack.8.*)
+    #    but comfy expects a dense ModuleList (visual.deepstack_merger_list.0.*)
+    #  - fused attention is named attn_qkv but the module is attn.qkv
+    import re
+    idxs = sorted({int(m.group(1)) for k in vsd
+                   for m in [re.match(r"v\.deepstack\.(\d+)\.", k)] if m})
+    out = {}
+    for k, v in vsd.items():
+        m = re.match(r"v\.deepstack\.(\d+)\.(fc1|fc2|norm)\.(.+)$", k)
+        if m:
+            blk, part, rest = int(m.group(1)), m.group(2), m.group(3)
+            part = "linear_" + part if part.startswith("fc") else part
+            k = f"visual.deepstack_merger_list.{idxs.index(blk)}.{part}.{rest}"
+        elif ".attn_qkv." in k:
+            k = k.replace(".attn_qkv.", ".attn.qkv.")
+        elif ".mlp.up_proj." in k:
+            # Qwen3.5 비전 MLP은 linear_fc1/linear_fc2 이름 (stock 맵의 up/down은 LLM 관례)
+            k = k.replace(".mlp.up_proj.", ".mlp.linear_fc1.")
+        elif ".mlp.down_proj." in k:
+            k = k.replace(".mlp.down_proj.", ".mlp.linear_fc2.")
+        elif ".merger.mlp.0." in k:
+            # Qwen35 패치머저도 linear_fc1/fc2+norm (Qwen2-VL의 mlp.0/mlp.2/ln_q 아님)
+            k = k.replace(".merger.mlp.0.", ".merger.linear_fc1.")
+        elif ".merger.mlp.2." in k:
+            k = k.replace(".merger.mlp.2.", ".merger.linear_fc2.")
+        elif ".merger.ln_q." in k:
+            k = k.replace(".merger.ln_q.", ".merger.norm.")
+        elif k == "v.position_embd.weight":
+            continue  # llama.cpp 위치 버퍼 — comfy는 학습된 pos_embed 사이드카로 대체
+        out[k] = v
+    # 학습된 위치 임베딩 보충 — mmproj 변환에서 누락되는 visual.pos_embed.weight를
+    # 사이드카(<인코더stem>-pos_embed.safetensors)에서 읽어 주입. 없으면 comfy 기본
+    # 초기화로 진행(위치 인코딩 품질 저하 only, 크래시는 없음).
+    if "visual.pos_embed.weight" not in out:
+        sidecar = os.path.join(os.path.dirname(path), "MiniMax-H3-encoder-pos_embed.safetensors")
+        try:
+            import safetensors.torch
+            extra = safetensors.torch.load_file(sidecar)
+            out.update(extra)
+            logging.info(f"Injected learned pos_embed from {os.path.basename(sidecar)}")
+        except Exception:
+            logging.warning(f"pos_embed sidecar missing: {sidecar} — vision positions fall back to init")
+    return out
+
+
 def gguf_mmproj_loader(path):
     # Reverse version of Qwen2VLVisionModel.modify_tensors
     logging.info("Attenpting to find mmproj file for text encoder...")
@@ -500,6 +547,11 @@ def gguf_clip_loader(path):
             sd = llama_permute(sd, 32, 8) # L3 / Mistral
         if arch == "qwen2vl":
             vsd = gguf_mmproj_loader(path)
+            sd.update(vsd)
+        elif arch == "qwen3vl":
+            # MiniMax H3 / Qwen3-VL: merge mmproj + fix tensor names for
+            # comfy's Qwen3VLVisionModel (deepstack ModuleList, fused qkv)
+            vsd = qwen3vl_vision_fixup(gguf_mmproj_loader(path), path)
             sd.update(vsd)
     else:
         pass

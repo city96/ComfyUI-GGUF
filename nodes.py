@@ -171,7 +171,13 @@ class UnetLoaderGGUF:
         kwargs = {}
         valid_params = inspect.signature(comfy.sd.load_diffusion_model_state_dict).parameters
         if "metadata" in valid_params:
-            kwargs["metadata"] = extra.get("metadata", {})
+            gguf_md = extra.get("metadata", {})
+            # converters (comfy_model_tools) store the checkpoint config under a
+            # prefixed key; comfy's model_detection looks for plain "config"
+            # (e.g. MiniMax H3 PDD checkpoints declare transformer.pdd_steps there)
+            if "comfy.gguf.metadata.config" in gguf_md and "config" not in gguf_md:
+                gguf_md = {**gguf_md, "config": gguf_md["comfy.gguf.metadata.config"]}
+            kwargs["metadata"] = gguf_md
 
         model = comfy.sd.load_diffusion_model_state_dict(
             sd, model_options={"custom_operations": ops}, **kwargs,
