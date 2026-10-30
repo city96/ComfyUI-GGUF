@@ -1,0 +1,995 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>JSON Prompt Generation Tool</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        input[type="range"] {
+            accent-color: #2563eb;
+        }
+
+        #canvas-stage {
+            position: relative;
+            flex: none;
+        }
+
+        #canvas-wrapper {
+            background: repeating-conic-gradient(#eee 0% 25%, transparent 0% 50%) 50% / 20px 20px;
+            background-color: #fff;
+            border: 1px dashed #94a3b8;
+            position: absolute;
+            inset: 0 auto auto 0;
+            transform-origin: top left;
+            overflow: hidden;
+            user-select: none;
+            touch-action: none;
+        }
+
+        .bounding-box {
+            position: absolute;
+            border: 2px solid #ff0044;
+            background: rgba(255, 0, 68, 0.2);
+            cursor: grab;
+            box-sizing: border-box;
+        }
+
+        .bounding-box.selected {
+            border-color: #0066FF;
+            background: rgba(0, 102, 255, 0.2);
+            z-index: 10;
+        }
+
+        .resize-handle {
+            position: absolute;
+            width: 10px;
+            height: 10px;
+            background: white;
+            border: 1px solid black;
+            right: -5px;
+            bottom: -5px;
+            cursor: nwse-resize;
+        }
+
+        .color-list {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.375rem;
+            margin-top: 0.5rem;
+        }
+
+        .swatch {
+            width: 2rem;
+            height: 2rem;
+            border: 1px solid #000;
+            border-radius: 0.375rem;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 10px;
+            cursor: pointer;
+            color: transparent;
+            transition: 0.2s;
+        }
+
+        .swatch:hover {
+            color: #fff;
+            text-shadow: 0 0 2px #000;
+        }
+    </style>
+
+</head>
+
+<body class="min-h-screen bg-slate-50 text-slate-900 antialiased">
+
+    <main class="mx-auto flex w-full max-w-[1800px] flex-col gap-4 p-4 lg:p-6">
+        <header class="rounded-lg border border-slate-200 bg-white px-4 py-3 shadow-sm">
+            <div class="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] lg:items-end">
+                <div class="space-y-2">
+                    <div class="flex items-center justify-between gap-3">
+                        <label for="canvas-width" class="text-sm font-semibold text-slate-700">Width</label>
+                        <span id="w-val" class="cursor-text rounded-md bg-slate-100 px-2 py-1 font-mono text-sm text-slate-900" tabindex="0" title="Double-click to edit">1024</span>
+                    </div>
+                    <input type="range" id="canvas-width" min="256" max="4096" step="16" value="1024" class="w-full">
+                </div>
+                <div class="space-y-2">
+                    <div class="flex items-center justify-between gap-3">
+                        <label for="canvas-height" class="text-sm font-semibold text-slate-700">Height</label>
+                        <span id="h-val" class="cursor-text rounded-md bg-slate-100 px-2 py-1 font-mono text-sm text-slate-900" tabindex="0" title="Double-click to edit">1024</span>
+                    </div>
+                    <input type="range" id="canvas-height" min="256" max="4096" step="16" value="1024" class="w-full">
+                </div>
+                <button onclick="initCanvas()" class="inline-flex h-10 items-center justify-center rounded-md bg-blue-600 px-4 text-sm font-semibold text-white shadow-sm hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2">Reset Canvas</button>
+            </div>
+        </header>
+
+        <div class="grid gap-4 xl:grid-cols-[minmax(0,1fr)_420px]">
+            <section class="flex min-w-0 flex-col gap-4">
+                <section class="overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
+                    <div class="flex items-center justify-between border-b border-slate-200 px-4 py-3">
+                        <h1 class="text-base font-semibold text-slate-900">Prompt Canvas</h1>
+                        <span class="rounded-md bg-slate-100 px-2 py-1 text-xs font-medium text-slate-600" id="canvas-size-label">1024 x 1024</span>
+                    </div>
+                    <div class="bg-slate-100 p-4">
+                        <div id="canvas-viewport" class="mx-auto max-h-[840px] max-w-full overflow-auto rounded-md border border-slate-200 bg-white p-2">
+                            <div id="canvas-stage">
+                                <div id="canvas-wrapper"></div>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <div class="grid gap-4">
+                    <section class="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+                        <div class="mb-3 flex flex-wrap items-center justify-between gap-2">
+                            <h2 class="text-sm font-semibold text-slate-900">Prompt JSON</h2>
+                            <div class="flex gap-2">
+                                <button onclick="parsePromptTextarea()" class="inline-flex h-9 items-center justify-center rounded-md border border-slate-300 bg-white px-3 text-sm font-semibold text-slate-700 shadow-sm hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2">Load JSON</button>
+                                <button onclick="generateJSON()" class="inline-flex h-9 items-center justify-center rounded-md bg-emerald-600 px-3 text-sm font-semibold text-white shadow-sm hover:bg-emerald-700 focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:ring-offset-2">Generate JSON</button>
+                            </div>
+                        </div>
+                        <textarea id="json-output" class="h-[320px] w-full resize-y rounded-md border border-slate-300 bg-white p-3 font-mono text-sm leading-5 text-slate-900 shadow-sm placeholder:text-slate-400 focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500" placeholder="Paste or generate prompt JSON"></textarea>
+                        <div id="json-status" class="mt-2 min-h-5 text-xs text-slate-500"></div>
+                    </section>
+                </div>
+            </section>
+
+            <aside class="space-y-4">
+                <section class="rounded-lg border border-slate-200 bg-white p-4 shadow-sm">
+                    <h2 class="mb-4 border-b border-slate-200 pb-2 text-sm font-semibold text-slate-900">Global Settings</h2>
+                    <div class="mb-4 flex flex-wrap items-center gap-2">
+                        <span class="text-sm font-semibold text-slate-700">Mode</span>
+                        <input type="radio" id="mode_photo" name="art_mode" value="photo" class="peer/photo sr-only" onchange="setPhotoArtstyle(0)">
+                        <label for="mode_photo" class="cursor-pointer rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm font-semibold text-slate-700 shadow-sm hover:bg-slate-50 peer-checked/photo:bg-blue-600 peer-checked/photo:text-white">photo</label>
+
+                        <input type="radio" id="mode_artstyle" name="art_mode" value="art_style" class="peer/art sr-only" checked onchange="setPhotoArtstyle(1)">
+                        <label for="mode_artstyle" class="cursor-pointer rounded-md border border-slate-300 bg-white px-3 py-1.5 text-sm font-semibold text-slate-700 shadow-sm hover:bg-slate-50 peer-checked/art:bg-blue-600 peer-checked/art:text-white">art_style</label>
+                    </div>
+                    <div class="space-y-3">
+                        <div class="space-y-1.5"><label for="high_level_description" class="text-sm font-semibold text-slate-700">High Level Description</label><textarea id="high_level_description" class="min-h-24 w-full resize-y rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500"></textarea></div>
+                        <div class="space-y-1.5"><label for="aesthetics" class="text-sm font-semibold text-slate-700">Aesthetics</label><input type="text" id="aesthetics" class="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500"></div>
+                        <div class="space-y-1.5"><label for="lighting" class="text-sm font-semibold text-slate-700">Lighting</label><input type="text" id="lighting" class="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500"></div>
+                        <div class="space-y-1.5"><label for="medium" class="text-sm font-semibold text-slate-700">Medium</label><input type="text" id="medium" class="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-slate-100 disabled:text-slate-500"></div>
+                        <div class="space-y-1.5"><label id="mode_label" for="art_style" class="text-sm font-semibold text-slate-700">Art Style</label><input type="text" id="art_style" class="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500"></div>
+                        <div class="space-y-1.5"><label for="background" class="text-sm font-semibold text-slate-700">Background</label><textarea id="background" class="min-h-24 w-full resize-y rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500"></textarea></div>
+                        <div>
+                            <label for="global-color-picker" class="text-sm font-semibold text-slate-700">Global Color Palette (Max 16)</label>
+                            <div class="mt-2 flex items-center gap-2">
+                                <input type="color" id="global-color-picker" class="h-9 w-12 rounded-md border border-slate-300 bg-white p-1">
+                                <button onclick="addColor('global')" class="inline-flex h-9 items-center justify-center rounded-md border border-slate-300 bg-white px-3 text-sm font-semibold text-slate-700 shadow-sm hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2">Add</button>
+                            </div>
+                            <div id="global-colors" class="color-list"></div>
+                        </div>
+                    </div>
+                </section>
+
+                <section class="rounded-lg border border-slate-200 bg-white p-4 shadow-sm" id="box-panel" style="display: none;">
+                    <div class="mb-4 flex items-center justify-between gap-3 border-b border-slate-200 pb-2">
+                        <h2 class="text-sm font-semibold text-slate-900">Selected Box Properties</h2>
+                        <div class="flex items-center gap-1">
+                            <button type="button" onclick="cycleSelectedBox(-1)" class="inline-flex h-7 w-8 items-center justify-center rounded-md border border-slate-300 bg-white text-xs font-semibold text-slate-700 shadow-sm hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2" title="Previous box">&leftarrow;</button>
+                            <button type="button" onclick="cycleSelectedBox(1)" class="inline-flex h-7 w-8 items-center justify-center rounded-md border border-slate-300 bg-white text-xs font-semibold text-slate-700 shadow-sm hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2" title="Next box">&rightarrow;</button>
+                        </div>
+                    </div>
+                    <div class="space-y-3">
+                        <div class="space-y-1.5">
+                            <label for="box-mode" class="text-sm font-semibold text-slate-700">Mode</label>
+                            <select id="box-mode" class="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500" onchange="updateBoxData()" oninput="updateBoxData()">
+                                <option value="obj">Object (obj)</option>
+                                <option value="text">Text (text)</option>
+                            </select>
+                        </div>
+                        <div class="space-y-1.5" id="text-input-group" style="display: none;">
+                            <label for="box-text" class="text-sm font-semibold text-slate-700">Text Content</label>
+                            <input type="text" id="box-text" class="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500" onchange="updateBoxData()" oninput="updateBoxData()">
+                        </div>
+                        <div class="space-y-1.5">
+                            <label for="box-desc" class="text-sm font-semibold text-slate-700">Description</label>
+                            <textarea id="box-desc" class="min-h-24 w-full resize-y rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:border-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-500" onchange="updateBoxData()" oninput="updateBoxData()"></textarea>
+                        </div>
+                        <div>
+                            <label for="box-color-picker" class="text-sm font-semibold text-slate-700">Box Color Palette (Max 5)</label>
+                            <div class="mt-2 flex items-center gap-2">
+                                <input type="color" id="box-color-picker" class="h-9 w-12 rounded-md border border-slate-300 bg-white p-1">
+                                <button onclick="addColor('box')" class="inline-flex h-9 items-center justify-center rounded-md border border-slate-300 bg-white px-3 text-sm font-semibold text-slate-700 shadow-sm hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2">Add</button>
+                            </div>
+                            <div id="box-colors" class="color-list"></div>
+                        </div>
+                        <button onclick="deleteSelectedBox()" class="inline-flex h-10 w-full items-center justify-center rounded-md bg-rose-600 px-4 text-sm font-semibold text-white shadow-sm hover:bg-rose-700 focus:outline-none focus:ring-2 focus:ring-rose-500 focus:ring-offset-2">Delete Box</button>
+                    </div>
+                </section>
+            </aside>
+        </div>
+    </main>
+
+    <script>
+        var json_prompt = JSON.parse(atob("eyIyNSI6eyJpbnB1dHMiOnsiaW1hZ2VzIjpbIjk4OjEzIiwwXX0sImNsYXNzX3R5cGUiOiJQcmV2aWV3SW1hZ2UiLCJfbWV0YSI6eyJ0aXRsZSI6IlByZXZpZXcgSW1hZ2UifX0sIjk4OjkiOnsiaW5wdXRzIjp7InZhZV9uYW1lIjoiZmx1eDItdmFlLnNhZmV0ZW5zb3JzIn0sImNsYXNzX3R5cGUiOiJWQUVMb2FkZXIiLCJfbWV0YSI6eyJ0aXRsZSI6IkxvYWQgVkFFIn19LCI5ODoxMCI6eyJpbnB1dHMiOnsiY29uZGl0aW9uaW5nIjpbIjk4OjI0IiwwXX0sImNsYXNzX3R5cGUiOiJDb25kaXRpb25pbmdaZXJvT3V0IiwiX21ldGEiOnsidGl0bGUiOiJDb25kaXRpb25pbmdaZXJvT3V0In19LCI5ODoxMSI6eyJpbnB1dHMiOnsid2lkdGgiOlsiOTg6MzEiLDFdLCJoZWlnaHQiOlsiOTg6MzIiLDFdLCJiYXRjaF9zaXplIjoxfSwiY2xhc3NfdHlwZSI6IkVtcHR5Rmx1eDJMYXRlbnRJbWFnZSIsIl9tZXRhIjp7InRpdGxlIjoiRW1wdHkgRmx1eCAyIExhdGVudCJ9fSwiOTg6MTIiOnsiaW5wdXRzIjp7Im5vaXNlIjpbIjk4OjE4IiwwXSwiZ3VpZGVyIjpbIjk4OjE1NSIsMF0sInNhbXBsZXIiOlsiOTg6MTYiLDBdLCJzaWdtYXMiOlsiOTg6MTciLDBdLCJsYXRlbnRfaW1hZ2UiOlsiOTg6MTEiLDBdfSwiY2xhc3NfdHlwZSI6IlNhbXBsZXJDdXN0b21BZHZhbmNlZCIsIl9tZXRhIjp7InRpdGxlIjoiU2FtcGxlckN1c3RvbUFkdmFuY2VkIn19LCI5ODoxMyI6eyJpbnB1dHMiOnsic2FtcGxlcyI6WyI5ODoxMiIsMF0sInZhZSI6WyI5ODo5IiwwXX0sImNsYXNzX3R5cGUiOiJWQUVEZWNvZGUiLCJfbWV0YSI6eyJ0aXRsZSI6IlZBRSBEZWNvZGUifX0sIjk4OjE2Ijp7ImlucHV0cyI6eyJzYW1wbGVyX25hbWUiOiJyZXNfbXVsdGlzdGVwIn0sImNsYXNzX3R5cGUiOiJLU2FtcGxlclNlbGVjdCIsIl9tZXRhIjp7InRpdGxlIjoiS1NhbXBsZXJTZWxlY3QifX0sIjk4OjE3Ijp7ImlucHV0cyI6eyJzdGVwcyI6WyI5ODoxNTEiLDFdLCJ3aWR0aCI6WyI5ODozMSIsMV0sImhlaWdodCI6WyI5ODozMiIsMV0sIm11IjpbIjk4OjE0NCIsMF0sInN0ZCI6WyI5ODoxNDYiLDBdfSwiY2xhc3NfdHlwZSI6IklkZW9ncmFtNFNjaGVkdWxlciIsIl9tZXRhIjp7InRpdGxlIjoiSWRlb2dyYW0gNCBTY2hlZHVsZXIifX0sIjk4OjE4Ijp7ImlucHV0cyI6eyJub2lzZV9zZWVkIjo0MjU2OTI1MzAzMDkyNTB9LCJjbGFzc190eXBlIjoiUmFuZG9tTm9pc2UiLCJfbWV0YSI6eyJ0aXRsZSI6IlJhbmRvbU5vaXNlIn19LCI5ODoyMyI6eyJpbnB1dHMiOnsidW5ldF9uYW1lIjoiaWRlb2dyYW00X2ZwOF9zY2FsZWQuc2FmZXRlbnNvcnMiLCJ3ZWlnaHRfZHR5cGUiOiJkZWZhdWx0In0sImNsYXNzX3R5cGUiOiJVTkVUTG9hZGVyIiwiX21ldGEiOnsidGl0bGUiOiJMb2FkIERpZmZ1c2lvbiBNb2RlbCJ9fSwiOTg6MjQiOnsiaW5wdXRzIjp7InRleHQiOiJBU0RGQVNERiIsImNsaXAiOlsiOTg6MTQiLDBdfSwiY2xhc3NfdHlwZSI6IkNMSVBUZXh0RW5jb2RlIiwiX21ldGEiOnsidGl0bGUiOiJDTElQIFRleHQgRW5jb2RlIChQb3NpdGl2ZSBQcm9tcHQpIn19LCI5ODoxNCI6eyJpbnB1dHMiOnsiY2xpcF9uYW1lIjoicXdlbjN2bF84Yl9mcDhfc2NhbGVkLnNhZmV0ZW5zb3JzIiwidHlwZSI6ImlkZW9ncmFtNCIsImRldmljZSI6ImRlZmF1bHQifSwiY2xhc3NfdHlwZSI6IkNMSVBMb2FkZXIiLCJfbWV0YSI6eyJ0aXRsZSI6IkxvYWQgQ0xJUCJ9fSwiOTg6MjciOnsiaW5wdXRzIjp7InZhbHVlIjoxMDI0fSwiY2xhc3NfdHlwZSI6IlByaW1pdGl2ZUludCIsIl9tZXRhIjp7InRpdGxlIjoiSW50IChXaWR0aCkifX0sIjk4OjI4Ijp7ImlucHV0cyI6eyJ2YWx1ZSI6MTAyNH0sImNsYXNzX3R5cGUiOiJQcmltaXRpdmVJbnQiLCJfbWV0YSI6eyJ0aXRsZSI6IkludCAoSGVpZ2h0KSJ9fSwiOTg6MzEiOnsiaW5wdXRzIjp7ImV4cHJlc3Npb24iOiJtYXgoKChhICsgMTUpIC8vIDE2KSAqIDE2LCAyNTYpIiwidmFsdWVzLmEiOlsiOTg6MjciLDBdfSwiY2xhc3NfdHlwZSI6IkNvbWZ5TWF0aEV4cHJlc3Npb24iLCJfbWV0YSI6eyJ0aXRsZSI6Ik1hdGggRXhwcmVzc2lvbiJ9fSwiOTg6MzIiOnsiaW5wdXRzIjp7ImV4cHJlc3Npb24iOiJtYXgoKChhICsgMTUpIC8vIDE2KSAqIDE2LCAyNTYpIiwidmFsdWVzLmEiOlsiOTg6MjgiLDBdfSwiY2xhc3NfdHlwZSI6IkNvbWZ5TWF0aEV4cHJlc3Npb24iLCJfbWV0YSI6eyJ0aXRsZSI6Ik1hdGggRXhwcmVzc2lvbiJ9fSwiOTg6MTQ0Ijp7ImlucHV0cyI6eyJ2YWx1ZSI6WyI5ODoxNDUiLDBdfSwiY2xhc3NfdHlwZSI6IkNvbWZ5TnVtYmVyQ29udmVydCIsIl9tZXRhIjp7InRpdGxlIjoiTnVtYmVyIENvbnZlcnQifX0sIjk4OjE0NSI6eyJpbnB1dHMiOnsianNvbl9zdHJpbmciOlsiOTg6MTQ4IiwwXSwia2V5IjoibXUifSwiY2xhc3NfdHlwZSI6Ikpzb25FeHRyYWN0U3RyaW5nIiwiX21ldGEiOnsidGl0bGUiOiJFeHRyYWN0IFRleHQgZnJvbSBKU09OIn19LCI5ODoxNDYiOnsiaW5wdXRzIjp7InZhbHVlIjpbIjk4OjE1MCIsMF19LCJjbGFzc190eXBlIjoiQ29tZnlOdW1iZXJDb252ZXJ0IiwiX21ldGEiOnsidGl0bGUiOiJOdW1iZXIgQ29udmVydCJ9fSwiOTg6MTQ3Ijp7ImlucHV0cyI6eyJqc29uX3N0cmluZyI6IntcbiAgXCJRdWFsaXR5XCI6IHtcbiAgICBcIm51bV9zdGVwc1wiOiA0OCxcbiAgICBcIm11XCI6IDAuMCxcbiAgICBcInN0ZFwiOiAxLjUsXG4gICAgXCJwcmVzZXRfaWRcIjogXCJWNF9RVUFMSVRZXzQ4XCJcbiAgfSxcbiAgXCJEZWZhdWx0XCI6IHtcbiAgICBcIm51bV9zdGVwc1wiOiAyMCxcbiAgICBcIm11XCI6IDAuMCxcbiAgICBcInN0ZFwiOiAxLjc1LFxuICAgIFwicHJlc2V0X2lkXCI6IFwiVjRfREVGQVVMVF8yMFwiXG4gIH0sXG4gIFwiVHVyYm9cIjoge1xuICAgIFwibnVtX3N0ZXBzXCI6IDEyLFxuICAgIFwibXVcIjogMC41LFxuICAgIFwic3RkXCI6IDEuNzUsXG4gICAgXCJwcmVzZXRfaWRcIjogXCJWNF9UVVJCT18xMlwiXG4gIH1cbn0iLCJrZXkiOlsiOTg6MTU2IiwwXX0sImNsYXNzX3R5cGUiOiJKc29uRXh0cmFjdFN0cmluZyIsIl9tZXRhIjp7InRpdGxlIjoiRXh0cmFjdCBUZXh0IGZyb20gSlNPTiJ9fSwiOTg6MTQ4Ijp7ImlucHV0cyI6eyJzdHJpbmciOlsiOTg6MTQ3IiwwXSwiZmluZCI6IiciLCJyZXBsYWNlIjoiXCIifSwiY2xhc3NfdHlwZSI6IlN0cmluZ1JlcGxhY2UiLCJfbWV0YSI6eyJ0aXRsZSI6IlJlcGxhY2UgVGV4dCJ9fSwiOTg6MTQ5Ijp7ImlucHV0cyI6eyJqc29uX3N0cmluZyI6WyI5ODoxNDgiLDBdLCJrZXkiOiJudW1fc3RlcHMifSwiY2xhc3NfdHlwZSI6Ikpzb25FeHRyYWN0U3RyaW5nIiwiX21ldGEiOnsidGl0bGUiOiJFeHRyYWN0IFRleHQgZnJvbSBKU09OIn19LCI5ODoxNTAiOnsiaW5wdXRzIjp7Impzb25fc3RyaW5nIjpbIjk4OjE0OCIsMF0sImtleSI6InN0ZCJ9LCJjbGFzc190eXBlIjoiSnNvbkV4dHJhY3RTdHJpbmciLCJfbWV0YSI6eyJ0aXRsZSI6IkV4dHJhY3QgVGV4dCBmcm9tIEpTT04ifX0sIjk4OjE1MSI6eyJpbnB1dHMiOnsidmFsdWUiOlsiOTg6MTQ5IiwwXX0sImNsYXNzX3R5cGUiOiJDb21meU51bWJlckNvbnZlcnQiLCJfbWV0YSI6eyJ0aXRsZSI6Ik51bWJlciBDb252ZXJ0In19LCI5ODoxNTQiOnsiaW5wdXRzIjp7InVuZXRfbmFtZSI6ImlkZW9ncmFtNF91bmNvbmRpdGlvbmFsX2ZwOF9zY2FsZWQuc2FmZXRlbnNvcnMiLCJ3ZWlnaHRfZHR5cGUiOiJkZWZhdWx0In0sImNsYXNzX3R5cGUiOiJVTkVUTG9hZGVyIiwiX21ldGEiOnsidGl0bGUiOiJMb2FkIERpZmZ1c2lvbiBNb2RlbCJ9fSwiOTg6MTU1Ijp7ImlucHV0cyI6eyJjZmciOjcsIm1vZGVsIjpbIjk4OjE1NyIsMF0sInBvc2l0aXZlIjpbIjk4OjI0IiwwXSwibW9kZWxfbmVnYXRpdmUiOlsiOTg6MTU0IiwwXSwibmVnYXRpdmUiOlsiOTg6MTAiLDBdfSwiY2xhc3NfdHlwZSI6IkR1YWxNb2RlbEd1aWRlciIsIl9tZXRhIjp7InRpdGxlIjoiRHVhbCBNb2RlbCBDRkcgR3VpZGVyIn19LCI5ODoxNTYiOnsiaW5wdXRzIjp7ImNob2ljZSI6IkRlZmF1bHQiLCJpbmRleCI6MSwib3B0aW9uMSI6IlF1YWxpdHkiLCJvcHRpb24yIjoiRGVmYXVsdCIsIm9wdGlvbjMiOiJUdXJibyIsIm9wdGlvbjQiOiIifSwiY2xhc3NfdHlwZSI6IkN1c3RvbUNvbWJvIiwiX21ldGEiOnsidGl0bGUiOiJDdXN0b20gQ29tYm8ifX0sIjk4OjE1NyI6eyJpbnB1dHMiOnsiY2ZnIjozLCJzdGFydF9wZXJjZW50IjowLjksImVuZF9wZXJjZW50IjoxLCJtb2RlbCI6WyI5ODoyMyIsMF19LCJjbGFzc190eXBlIjoiQ0ZHT3ZlcnJpZGUiLCJfbWV0YSI6eyJ0aXRsZSI6IkNGRyBPdmVycmlkZSJ9fX0="))
+        // State
+        let canvasW = 1024;
+        let canvasH = 1024;
+        let scale = 1;
+        let boxes = [];
+        let globalPalette = [];
+        let selectedBoxId = null;
+        let boxCounter = 0;
+
+        // DOM Elements
+        const canvas = document.getElementById('canvas-wrapper');
+        const canvasStage = document.getElementById('canvas-stage');
+        const canvasWSlider = document.getElementById('canvas-width');
+        const canvasHSlider = document.getElementById('canvas-height');
+        const boxPanel = document.getElementById('box-panel');
+        const jsonOutput = document.getElementById('json-output');
+        const jsonStatus = document.getElementById('json-status');
+        const wValue = document.getElementById('w-val');
+        const hValue = document.getElementById('h-val');
+        const canvasSizeLabel = document.getElementById('canvas-size-label');
+
+        const CANVAS_MIN = parseInt(canvasWSlider.min, 10);
+        const CANVAS_MAX = parseInt(canvasWSlider.max, 10);
+        const CANVAS_STEP = parseInt(canvasWSlider.step, 10) || 1;
+
+        function normalizeDimension(value) {
+            const parsed = Number(value);
+            if (!Number.isFinite(parsed)) return null;
+
+            const snapped = Math.round(parsed / CANVAS_STEP) * CANVAS_STEP;
+            return Math.min(CANVAS_MAX, Math.max(CANVAS_MIN, snapped));
+        }
+
+        function setCanvasControls(width, height) {
+            const nextW = normalizeDimension(width);
+            const nextH = normalizeDimension(height);
+
+            if (nextW !== null) canvasWSlider.value = nextW;
+            if (nextH !== null) canvasHSlider.value = nextH;
+            applyCanvasSize();
+        }
+
+        function syncDimensionLabels() {
+            wValue.innerText = canvasW.toString();
+            hValue.innerText = canvasH.toString();
+            canvasSizeLabel.innerText = `${canvasW} x ${canvasH}`;
+        }
+
+        function applyCanvasSize() {
+            canvasW = parseInt(canvasWSlider.value, 10) || 1024;
+            canvasH = parseInt(canvasHSlider.value, 10) || 1024;
+
+            scale = canvasH > 800 ? 800 / canvasH : 1;
+
+            canvas.style.width = canvasW + 'px';
+            canvas.style.height = canvasH + 'px';
+            canvas.style.transform = `scale(${scale})`;
+            canvasStage.style.width = (canvasW * scale) + 'px';
+            canvasStage.style.height = (canvasH * scale) + 'px';
+            syncDimensionLabels();
+        }
+
+        function editCanvasDimension(axis) {
+            const span = axis === 'width' ? wValue : hValue;
+            const current = axis === 'width' ? canvasW : canvasH;
+            if (span.dataset.editing === 'true') return;
+
+            span.dataset.editing = 'true';
+            const input = document.createElement('input');
+            input.type = 'number';
+            input.min = CANVAS_MIN.toString();
+            input.max = CANVAS_MAX.toString();
+            input.step = CANVAS_STEP.toString();
+            input.value = current.toString();
+            input.className = 'w-24 rounded-md border border-blue-500 bg-white px-2 py-1 font-mono text-sm text-slate-900 shadow-sm outline-none ring-2 ring-blue-500';
+
+            let finished = false;
+            const finish = (commit) => {
+                if (finished) return;
+                finished = true;
+                if (commit) {
+                    const next = normalizeDimension(input.value);
+                    if (next !== null) {
+                        if (axis === 'width') {
+                            canvasWSlider.value = next;
+                        } else {
+                            canvasHSlider.value = next;
+                        }
+                    }
+                }
+                input.replaceWith(span);
+                span.dataset.editing = 'false';
+                applyCanvasSize();
+            };
+
+            input.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') finish(true);
+                if (e.key === 'Escape') finish(false);
+            });
+            input.addEventListener('blur', () => finish(true));
+            span.replaceWith(input);
+            input.focus();
+            input.select();
+        }
+
+        function clearCanvasBoxes() {
+            canvas.innerHTML = '';
+            boxes = [];
+            boxCounter = 0;
+            selectBox(null);
+        }
+
+        function setJSONStatus(message, type = 'neutral') {
+            jsonStatus.textContent = message;
+            jsonStatus.style.color = type === 'error' ? '#e11d48' : type === 'success' ? '#047857' : '#64748b';
+        }
+
+        // UI Listeners
+        canvasWSlider.addEventListener('input', applyCanvasSize);
+        canvasHSlider.addEventListener('input', applyCanvasSize);
+        wValue.addEventListener('dblclick', () => editCanvasDimension('width'));
+        hValue.addEventListener('dblclick', () => editCanvasDimension('height'));
+        wValue.addEventListener('keydown', e => {
+            if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                editCanvasDimension('width');
+            }
+        });
+        hValue.addEventListener('keydown', e => {
+            if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                editCanvasDimension('height');
+            }
+        });
+        jsonOutput.addEventListener('paste', () => {
+            window.setTimeout(() => parsePromptTextarea({ source: 'paste' }), 0);
+        });
+
+        document.addEventListener('dragover', (e) => {
+            e.preventDefault();
+        });
+        document.addEventListener('drop', (e) => {
+            e.preventDefault();
+
+            if (e.dataTransfer.files.length > 0) {
+                importImage(e.dataTransfer.files[0]); // is async
+            }
+        });
+
+        function initCanvas() {
+            applyCanvasSize();
+
+            canvas.style.backgroundImage = ""
+            canvas.style.backgroundSize = ""
+
+            jsonOutput.value = '';
+            setJSONStatus('');
+            clearCanvasBoxes();
+        }
+
+        // Color Palette Logic
+        function addColor(type) {
+            const picker = document.getElementById(type + '-color-picker');
+            let hex = picker.value.toUpperCase(); // Ideogram4 requires uppercase string
+
+            if (type === 'global') {
+                if (globalPalette.length >= 16) return alert("Max 16 colors allowed.");
+                if (!globalPalette.includes(hex)) {
+                    globalPalette.push(hex);
+                    renderColors('global');
+                }
+            } else if (type === 'box' && selectedBoxId !== null) {
+                const box = boxes.find(b => b.id === selectedBoxId);
+                if (!box) return;
+                box.colors = box.colors || [];
+                if (box.colors.length >= 5) return alert("Max 5 colors allowed per box.");
+                if (!box.colors.includes(hex)) {
+                    box.colors.push(hex);
+                    renderColors('box');
+                }
+            }
+        }
+
+        function removeColor(type, hex) {
+            if (type === 'global') {
+                globalPalette = globalPalette.filter(c => c !== hex);
+                renderColors('global');
+            } else if (type === 'box' && selectedBoxId !== null) {
+                const box = boxes.find(b => b.id === selectedBoxId);
+                box.colors = box.colors.filter(c => c !== hex);
+                renderColors('box');
+            }
+        }
+
+        function renderColors(type) {
+            const container = document.getElementById(type + '-colors');
+            container.innerHTML = '';
+            const list = type === 'global' ? globalPalette : (boxes.find(b => b.id === selectedBoxId)?.colors || []);
+
+            list.forEach(hex => {
+                const swatch = document.createElement('div');
+                swatch.className = 'swatch';
+                swatch.style.backgroundColor = hex;
+                swatch.onclick = () => removeColor(type, hex);
+                swatch.textContent = 'x';
+                container.appendChild(swatch);
+            });
+        }
+
+        function createBoxElement(box, selected = false) {
+            const boxElement = document.createElement('div');
+            boxElement.className = selected ? 'bounding-box selected' : 'bounding-box';
+            boxElement.id = box.id;
+            boxElement.style.left = box.x + 'px';
+            boxElement.style.top = box.y + 'px';
+            boxElement.style.width = box.w + 'px';
+            boxElement.style.height = box.h + 'px';
+
+            const handle = document.createElement('div');
+            handle.className = 'resize-handle';
+            boxElement.appendChild(handle);
+
+            return boxElement;
+        }
+
+        function syncBoxFromDom(boxId) {
+            const box = boxes.find(b => b.id === boxId);
+            const dom = document.getElementById(boxId);
+            if (!box || !dom) return;
+
+            box.x = parseFloat(dom.style.left) || 0;
+            box.y = parseFloat(dom.style.top) || 0;
+            box.w = parseFloat(dom.style.width) || 0;
+            box.h = parseFloat(dom.style.height) || 0;
+        }
+
+        function setBoxPanelHighlight(boxElement) {
+            if (!boxElement) {
+                boxPanel.style.borderColor = '';
+                boxPanel.style.boxShadow = '';
+                return;
+            }
+
+            const borderColor = getComputedStyle(boxElement).borderTopColor;
+            boxPanel.style.borderColor = borderColor;
+            boxPanel.style.boxShadow = `0 0 0 1px ${borderColor}`;
+        }
+
+        // Canvas Drawing Logic
+        let isDrawing = false;
+        let isDragging = false;
+        let isResizing = false;
+        let currentBoxDOM = null;
+        let startX, startY;
+
+        canvas.addEventListener('pointerdown', (e) => {
+            if (e.target === canvas) {
+                isDrawing = true;
+                const rect = canvas.getBoundingClientRect();
+                startX = (e.clientX - rect.left) / scale;
+                startY = (e.clientY - rect.top) / scale;
+
+                const box = {
+                    id: 'box_' + boxCounter++,
+                    x: startX, y: startY, w: 0, h: 0,
+                    mode: 'obj', text: '', desc: '', colors: []
+                };
+                boxes.push(box);
+
+                currentBoxDOM = createBoxElement(box, true);
+                canvas.appendChild(currentBoxDOM);
+                selectBox(box.id);
+            } else if (e.target.classList.contains('resize-handle')) {
+                isResizing = true;
+                currentBoxDOM = e.target.parentElement;
+                selectBox(currentBoxDOM.id);
+                const rect = canvas.getBoundingClientRect();
+                dragStartX = (e.clientX - rect.left) / scale;
+                dragStartY = (e.clientY - rect.top) / scale;
+                initialBoxW = parseFloat(currentBoxDOM.style.width);
+                initialBoxH = parseFloat(currentBoxDOM.style.height);
+                e.stopPropagation();
+            } else if (e.target.classList.contains('bounding-box')) {
+                isDragging = true;
+                currentBoxDOM = e.target;
+                selectBox(currentBoxDOM.id);
+                const rect = canvas.getBoundingClientRect();
+                dragStartX = (e.clientX - rect.left) / scale;
+                dragStartY = (e.clientY - rect.top) / scale;
+                initialBoxX = parseFloat(currentBoxDOM.style.left);
+                initialBoxY = parseFloat(currentBoxDOM.style.top);
+                e.stopPropagation();
+            }
+        });
+
+        canvas.addEventListener('pointermove', (e) => {
+            const rect = canvas.getBoundingClientRect();
+            const currentX = (e.clientX - rect.left) / scale;
+            const currentY = (e.clientY - rect.top) / scale;
+
+            if (isDrawing && currentBoxDOM) {
+                const w = currentX - startX;
+                const h = currentY - startY;
+                currentBoxDOM.style.width = Math.abs(w) + 'px';
+                currentBoxDOM.style.height = Math.abs(h) + 'px';
+                currentBoxDOM.style.left = (w < 0 ? currentX : startX) + 'px';
+                currentBoxDOM.style.top = (h < 0 ? currentY : startY) + 'px';
+            }
+        });
+
+        window.addEventListener('pointerup', () => {
+            if (isDrawing && currentBoxDOM) {
+                // Save final dimensions
+                const box = boxes.find(b => b.id === currentBoxDOM.id);
+                box.w = parseFloat(currentBoxDOM.style.width) || 0;
+                box.h = parseFloat(currentBoxDOM.style.height) || 0;
+                box.x = parseFloat(currentBoxDOM.style.left) || 0;
+                box.y = parseFloat(currentBoxDOM.style.top) || 0;
+
+                if (box.w < 10 || box.h < 10) {
+                    // Ignore tiny accidental clicks
+                    canvas.removeChild(currentBoxDOM);
+                    boxes = boxes.filter(b => b.id !== box.id);
+                    selectBox(null);
+                }
+            } else if ((isDragging || isResizing) && currentBoxDOM) {
+                syncBoxFromDom(currentBoxDOM.id);
+            }
+            isDrawing = false;
+            isDragging = false;
+            isResizing = false;
+            currentBoxDOM = null;
+        });
+
+        // Box Interaction (Select, Drag, Resize)
+        let dragStartX, dragStartY, initialBoxX, initialBoxY, initialBoxW, initialBoxH;
+
+        window.addEventListener('pointermove', (e) => {
+            const rect = canvas.getBoundingClientRect();
+            const currentX = (e.clientX - rect.left) / scale;
+            const currentY = (e.clientY - rect.top) / scale;
+
+            if (isDragging && currentBoxDOM) {
+                const dx = currentX - dragStartX;
+                const dy = currentY - dragStartY;
+                currentBoxDOM.style.left = (initialBoxX + dx) + 'px';
+                currentBoxDOM.style.top = (initialBoxY + dy) + 'px';
+            } else if (isResizing && currentBoxDOM) {
+                const dx = currentX - dragStartX;
+                const dy = currentY - dragStartY;
+                currentBoxDOM.style.width = Math.max(10, initialBoxW + dx) + 'px';
+                currentBoxDOM.style.height = Math.max(10, initialBoxH + dy) + 'px';
+            }
+        });
+
+        // Box Forms logic
+        function selectBox(id) {
+            selectedBoxId = id;
+            document.querySelectorAll('.bounding-box').forEach(el => el.classList.remove('selected'));
+            if (id) {
+                const box = boxes.find(b => b.id === id);
+                const dom = document.getElementById(id);
+                if (!box || !dom) {
+                    selectedBoxId = null;
+                    boxPanel.style.display = 'none';
+                    setBoxPanelHighlight(null);
+                    return;
+                }
+
+                dom.classList.add('selected');
+                boxPanel.style.display = 'block';
+                setBoxPanelHighlight(dom);
+                document.getElementById('box-mode').value = box.mode;
+                document.getElementById('box-text').value = box.text;
+                document.getElementById('box-desc').value = box.desc;
+                document.getElementById('text-input-group').style.display = box.mode === 'text' ? 'block' : 'none';
+                renderColors('box');
+            } else {
+                boxPanel.style.display = 'none';
+                setBoxPanelHighlight(null);
+            }
+        }
+
+        function cycleSelectedBox(direction) {
+            const selectableBoxes = boxes.filter(box => document.getElementById(box.id));
+            if (selectableBoxes.length === 0) {
+                selectBox(null);
+                return;
+            }
+
+            const currentIndex = selectableBoxes.findIndex(box => box.id === selectedBoxId);
+            const startIndex = currentIndex === -1 ? 0 : currentIndex;
+            const nextIndex = (startIndex + direction + selectableBoxes.length) % selectableBoxes.length;
+            selectBox(selectableBoxes[nextIndex].id);
+        }
+
+        function updateBoxData() {
+            if (!selectedBoxId) return;
+            const box = boxes.find(b => b.id === selectedBoxId);
+            if (!box) return;
+            box.mode = document.getElementById('box-mode').value;
+            box.text = document.getElementById('box-text').value;
+            box.desc = document.getElementById('box-desc').value;
+            document.getElementById('text-input-group').style.display = box.mode === 'text' ? 'block' : 'none';
+        }
+
+        function deleteSelectedBox() {
+            if (!selectedBoxId) return;
+            const dom = document.getElementById(selectedBoxId);
+            if (dom) dom.remove();
+            boxes = boxes.filter(b => b.id !== selectedBoxId);
+            selectBox(null);
+        }
+
+        // JSON Generation
+        function generateJSON() {
+            // Save current bounding box positions to state
+            boxes.forEach(box => {
+                const dom = document.getElementById(box.id);
+                if (dom) {
+                    box.x = parseFloat(dom.style.left);
+                    box.y = parseFloat(dom.style.top);
+                    box.w = parseFloat(dom.style.width);
+                    box.h = parseFloat(dom.style.height);
+                }
+            });
+
+            // Normalize Coordinates 0-1000
+            const norm = (val, max) => Math.min(1000, Math.max(0, Math.round((val / max) * 1000)));
+
+            const elements = boxes.map(box => {
+                const x1 = norm(box.x, canvasW);
+                const y1 = norm(box.y, canvasH);
+                const x2 = norm(box.x + box.w, canvasW);
+                const y2 = norm(box.y + box.h, canvasH);
+
+                let el = {
+                    type: box.mode,
+                    bbox: [y1, x1, y2, x2],
+                };
+
+                if (box.mode === 'text') el.text = box.text;
+                el.desc = box.desc;
+                if (box.colors && box.colors.length > 0) el.color_palette = box.colors;
+
+                return el;
+            });
+
+            var output = {
+                high_level_description: document.getElementById('high_level_description').value,
+                style_description: {
+                    aesthetics: document.getElementById('aesthetics').value,
+                    lighting: document.getElementById('lighting').value,
+                    //medium: document.getElementById('medium').value,
+                    //art_style: document.getElementById('art_style').value,
+                    //color_palette: globalPalette
+                },
+                compositional_deconstruction: {
+                    background: document.getElementById('background').value,
+                    elements: elements
+                }
+            };
+
+            // in photo mode, order in prompt should be "photo" then "medium",
+            // while in art_style mode order should be "medium" then "art_style"
+            if(photoArtStyleMode == MODE_PHOTO){
+                output.style_description.photo = document.getElementById('art_style').value;
+                output.style_description.medium = document.getElementById('medium').value;
+            }
+            else{
+                output.style_description.medium = document.getElementById('medium').value;
+                output.style_description.art_style = document.getElementById('art_style').value
+            }
+
+            output.style_description.color_palette = globalPalette
+
+            jsonOutput.value = JSON.stringify(output, null, 2);
+            setJSONStatus(`Generated ${elements.length} element${elements.length === 1 ? '' : 's'}.`, 'success');
+        }
+
+        function setImage(imgURL){
+            canvas.style.backgroundImage = `url("${imgURL}")`
+            canvas.style.backgroundSize = "cover"
+        }
+
+        function extractComfyUIMetadata(arrayBuffer) {
+            const view = new DataView(arrayBuffer);
+
+            // Check valid PNG 8-byte signature
+            if (view.byteLength < 8 || view.getUint32(0) !== 0x89504E47 || view.getUint32(4) !== 0x0D0A1A0A) {
+                throw new Error("Not a valid PNG file.");
+            }
+
+            let offset = 8;
+            const result = {};
+
+            while (offset < view.byteLength) {
+                if (offset + 8 > view.byteLength) break;
+
+                // Read chunk length and type
+                const length = view.getUint32(offset);
+                const chunkType = String.fromCharCode(
+                    view.getUint8(offset + 4),
+                    view.getUint8(offset + 5),
+                    view.getUint8(offset + 6),
+                    view.getUint8(offset + 7)
+                );
+
+                offset += 8; // Move past length and type
+
+                if (chunkType === 'tEXt') {
+                    if (offset + length > view.byteLength) break;
+
+                    const chunkData = new Uint8Array(arrayBuffer, offset, length);
+                    const nullByteIndex = chunkData.indexOf(0); // Keyword and text are separated by a 0x00 byte
+
+                    if (nullByteIndex !== -1) {
+                        const keyword = new TextDecoder('ascii').decode(chunkData.subarray(0, nullByteIndex));
+
+                        if (keyword === 'prompt' || keyword === 'workflow') {
+                            const rawText = new TextDecoder('utf-8').decode(chunkData.subarray(nullByteIndex + 1));
+                            try {
+                                result[keyword] = JSON.parse(rawText);
+                            } catch (e) {
+                                result[keyword] = rawText; // Fallback if JSON parsing fails
+                            }
+                        }
+                    }
+                }
+
+                offset += length + 4; // Skip the data segment and the 4-byte CRC trailing checksum
+            }
+            const found = findPromptJSON(result.prompt) || findPromptJSON(result.workflow);
+            return found?.prompt;
+        }
+
+        function isPromptJSON(value) {
+            return value
+                && typeof value === 'object'
+                && !Array.isArray(value)
+                && Object.prototype.hasOwnProperty.call(value, 'high_level_description')
+                && value.style_description
+                && value.compositional_deconstruction;
+        }
+
+        function tryParseJSON(value) {
+            if (typeof value !== 'string') return value;
+            const trimmed = value.trim();
+            if (!trimmed) return null;
+            return JSON.parse(trimmed);
+        }
+
+        function extractCanvasSizeFromWorkflow(value) {
+            if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+
+            let width = null;
+            let height = null;
+            Object.values(value).forEach(node => {
+                const title = String(node?._meta?.title || '').toLowerCase();
+                const nodeValue = Number(node?.inputs?.value);
+                if (!Number.isFinite(nodeValue)) return;
+
+                if (title.includes('width')) width = nodeValue;
+                if (title.includes('height')) height = nodeValue;
+            });
+
+            return { width, height };
+        }
+
+        function findPromptJSON(value, seen = new Set()) {
+            let parsed;
+            try {
+                parsed = tryParseJSON(value);
+            } catch (e) {
+                return null;
+            }
+
+            if (!parsed || typeof parsed !== 'object') return null;
+            if (seen.has(parsed)) return null;
+            seen.add(parsed);
+
+            if (isPromptJSON(parsed)) return { prompt: parsed };
+
+            const canvasSize = extractCanvasSizeFromWorkflow(parsed);
+            const withCanvasSize = (result) => {
+                if (!result) return null;
+                return {
+                    prompt: result.prompt,
+                    width: result.width ?? canvasSize.width,
+                    height: result.height ?? canvasSize.height,
+                };
+            };
+
+            if (parsed.prompt) {
+                const result = findPromptJSON(parsed.prompt, seen);
+                if (result) return withCanvasSize(result);
+            }
+
+            for (const item of Object.values(parsed)) {
+                const textInput = item?.inputs?.text;
+                if (typeof textInput === 'string') {
+                    const result = findPromptJSON(textInput, seen);
+                    if (result) return withCanvasSize(result);
+                }
+            }
+
+            for (const item of Object.values(parsed)) {
+                const result = findPromptJSON(item, seen);
+                if (result) return withCanvasSize(result);
+            }
+
+            return null;
+        }
+
+        function sanitizePalette(colors, maxColors) {
+            const seen = new Set();
+            return (Array.isArray(colors) ? colors : [])
+                .map(color => String(color).trim().toUpperCase())
+                .filter(color => /^#[0-9A-F]{6}$/.test(color))
+                .filter(color => {
+                    if (seen.has(color)) return false;
+                    seen.add(color);
+                    return true;
+                })
+                .slice(0, maxColors);
+        }
+
+        function parseBoxesFromJSON(json) {
+            const elements = json?.compositional_deconstruction?.elements || [];
+            const fromNorm = (value, max) => {
+                const number = Number(value);
+                if (!Number.isFinite(number)) return 0;
+                return Math.min(max, Math.max(0, number / 1000 * max));
+            };
+
+            elements.forEach(element => {
+                const bbox = Array.isArray(element?.bbox) ? element.bbox : [0, 0, 0, 0];
+                const y1 = fromNorm(bbox[0], canvasH);
+                const x1 = fromNorm(bbox[1], canvasW);
+                const y2 = fromNorm(bbox[2], canvasH);
+                const x2 = fromNorm(bbox[3], canvasW);
+                const box = {
+                    id: 'box_' + boxCounter++,
+                    x: Math.min(x1, x2),
+                    y: Math.min(y1, y2),
+                    w: Math.abs(x2 - x1),
+                    h: Math.abs(y2 - y1),
+                    mode: element?.type === 'text' ? 'text' : 'obj',
+                    text: element?.text ?? '',
+                    desc: element?.desc ?? '',
+                    colors: sanitizePalette(element?.color_palette, 5),
+                };
+
+                boxes.push(box);
+                canvas.appendChild(createBoxElement(box));
+            });
+
+            if (boxes.length > 0) selectBox(boxes[0].id);
+        }
+
+        function parseParametersFromJSON(json) {
+            const style = json.style_description || {};
+            const composition = json.compositional_deconstruction || {};
+            const isPhotoMode = Object.prototype.hasOwnProperty.call(style, 'photo');
+
+            document.getElementById('high_level_description').value = json.high_level_description ?? '';
+            document.getElementById('aesthetics').value = style.aesthetics ?? '';
+            document.getElementById('lighting').value = style.lighting ?? '';
+            document.getElementById('background').value = composition.background ?? '';
+
+            globalPalette = sanitizePalette(style.color_palette, 16);
+            renderColors('global');
+
+            if (isPhotoMode) {
+                document.getElementById('mode_photo').checked = true;
+                setPhotoArtstyle(MODE_PHOTO);
+                document.getElementById('art_style').value = style.photo ?? '';
+            } else {
+                document.getElementById('mode_artstyle').checked = true;
+                setPhotoArtstyle(MODE_ARTSTYLE);
+                document.getElementById('art_style').value = style.art_style ?? '';
+            }
+
+            document.getElementById('medium').value = style.medium ?? (isPhotoMode ? 'photograph' : '');
+        }
+
+        function loadPromptJSON(json, options = {}) {
+            if (!isPromptJSON(json)) {
+                throw new Error('Unsupported prompt JSON shape.');
+            }
+
+            if (options.width || options.height) {
+                setCanvasControls(options.width ?? canvasW, options.height ?? canvasH);
+            }
+
+            clearCanvasBoxes();
+            parseParametersFromJSON(json);
+            parseBoxesFromJSON(json);
+
+            if (options.updateTextarea !== false) {
+                jsonOutput.value = JSON.stringify(json, null, 2);
+            }
+
+            const count = json?.compositional_deconstruction?.elements?.length || 0;
+            setJSONStatus(`Loaded ${count} editable element${count === 1 ? '' : 's'}.`, 'success');
+        }
+
+        function parsePromptTextarea(options = {}) {
+            const found = findPromptJSON(jsonOutput.value);
+            if (!found?.prompt) {
+                setJSONStatus(options.source === 'paste' ? 'Pasted text is not a supported prompt JSON.' : 'No supported prompt JSON found.', 'error');
+                return false;
+            }
+
+            try {
+                loadPromptJSON(found.prompt, {
+                    width: found.width,
+                    height: found.height,
+                    updateTextarea: true,
+                });
+                return true;
+            } catch (e) {
+                setJSONStatus(e.message, 'error');
+                return false;
+            }
+        }
+
+        async function importImage(image){
+            if(image.type.startsWith("image")){
+                // is image
+                const img = new Image();
+                img.onload = function() {
+                    canvasWSlider.value = this.width.toString();
+                    canvasHSlider.value = this.height.toString();
+                    initCanvas();
+                    setImage(img.src);
+
+                    if(image.type=="image/png"){
+                        // is png. try and find workflow metadata
+                        image.arrayBuffer()
+                        .then(buff => {
+                            const json = extractComfyUIMetadata(buff);
+                            if (json) {
+                                loadPromptJSON(json, { updateTextarea: true });
+                            } else {
+                                setJSONStatus('No supported prompt JSON found in PNG metadata.', 'error');
+                            }
+                        })
+                        .catch(() => setJSONStatus('Could not read PNG metadata.', 'error'));
+                    }
+                };
+                img.src = URL.createObjectURL(image);
+            }
+            else{
+                alert("images only")
+            }
+        }
+
+        var photoArtStyleMode = 1;
+        const MODE_PHOTO = 0;
+        const MODE_ARTSTYLE = 1;
+        function setPhotoArtstyle(mode){
+            console.log(mode)
+            photoArtStyleMode = mode
+            if(mode==MODE_PHOTO){
+                // photo mode
+                document.getElementById("medium").value = "photograph";
+                document.getElementById("medium").disabled = true
+                document.getElementById("mode_label").innerText = "Photo"
+            }
+            else if (mode==MODE_ARTSTYLE){
+                // art_style mode
+                document.getElementById("medium").disabled = false
+                document.getElementById("mode_label").innerText = "Art Style"
+            }
+            else{
+                console.error("invalid mode")
+            }
+        }
+
+        initCanvas();
+        setPhotoArtstyle(1)
+    </script>
+
+</body>
+
+</html>
