@@ -78,12 +78,23 @@ class GGUFModelPatcher(comfy.model_patcher.ModelPatcher):
         return super().unpatch_model(device_to=device_to, unpatch_weights=unpatch_weights)
 
 
+    def _mmap_detach_cpu(self, m):
+        # Detach one module from its mmap-backed storage without the GPU round trip.
+        # The previous .to(load_device).to(offload_device) excursion issues an H2D
+        # hipMemcpy whose source pages are mmap'd GGUF pages; on ROCm 7.x + RDNA2
+        # with recent ComfyUI cores that copy can intermittently lose its HSA
+        # completion signal and hang forever (loader thread spins at 100% CPU,
+        # GPU idle, all rings drained). A CPU-side copy=True materialization
+        # performs the same detach with zero GPU involvement.
+        for t in list(m.parameters()) + list(m.buffers()):
+            if t.data.is_cpu:
+                t.data = t.data.to(t.data.device, copy=True)
+
     def pin_weight_to_device(self, key):
         op_key = key.rsplit('.', 1)[0]
         if not self.mmap_released and op_key in self.named_modules_to_munmap:
             # TODO: possible to OOM, find better way to detach
-            self.named_modules_to_munmap[op_key].to(self.load_device).to(self.offload_device)
-            del self.named_modules_to_munmap[op_key]
+            self._mmap_detach_cpu(self.named_modules_to_munmap.pop(op_key))
         super().pin_weight_to_device(key)
 
     mmap_released = False
@@ -114,8 +125,7 @@ class GGUFModelPatcher(comfy.model_patcher.ModelPatcher):
             if linked and self.load_device != self.offload_device:
                 logging.info(f"Attempting to release mmap ({len(linked)})")
                 for n, m in linked:
-                    # TODO: possible to OOM, find better way to detach
-                    m.to(self.load_device).to(self.offload_device)
+                    self._mmap_detach_cpu(m)
             self.mmap_released = True
             self.named_modules_to_munmap = {}
 
