@@ -91,3 +91,14 @@ You can extract the patch again with `git diff src\llama.cpp > lcpp.patch` if yo
 > [!NOTE]
 > Do not quantize SDXL / SD1 / other Conv2D heavy models. If you do, make sure to **extract the UNET model first**.
 >This should be obvious, but also don't use the resulting llama-quantize binary with LLMs.
+
+## Qwen3.5 text encoders (e.g. MOSS-Image)
+
+llama.cpp `qwen35` GGUFs (e.g. [unsloth/Qwen3.5-9B-GGUF](https://huggingface.co/unsloth/Qwen3.5-9B-GGUF)) load directly, but the loader then has to undo llama.cpp's tensor changes on every load. `convert_qwen35.py` does that once and writes a GGUF with ComfyUI key names that loads without any fix-ups and keeps `out_proj` quantized:
+
+```
+python convert_qwen35.py --src Qwen3.5-9B-Q6_K.gguf --dst qwen3.5_9b-Q6_K-comfy.gguf \
+    --vision https://huggingface.co/Comfy-Org/MOSS-Image/resolve/main/text_encoders/qwen3.5_9b_bf16.safetensors
+```
+
+`--vision` is optional: it copies the vision tower (which text-only GGUFs lack but ComfyUI always builds) from a Qwen3.5 safetensors file; for URLs only those tensors are fetched with range requests.

@@ -116,6 +116,14 @@ class ModelLTXV(ModelTemplate):
         "scale_shift_table" # nn.parameter, can't load from BF16 base quant
     ]
 
+class ModelMoss(ModelTemplate):
+    arch = "moss_image"
+    # same keys ComfyUI's model detection uses; GGUFs from stable-diffusion.cpp's converter
+    # (sd-cli -M convert) carry no general.architecture and are detected through these
+    keys_detect = [
+        ("shared_block_modulation.weight", "layers.0.proj.ffn_up_gate.weight"),
+    ]
+
 class ModelSDXL(ModelTemplate):
     arch = "sdxl"
     shape_fix = True
@@ -146,7 +154,7 @@ class ModelLumina2(ModelTemplate):
     ]
 
 arch_list = [ModelFlux, ModelSD3, ModelAura, ModelHiDream, CosmosPredict2, 
-             ModelLTXV, ModelHyVid, ModelWan, ModelSDXL, ModelSD1, ModelLumina2]
+             ModelLTXV, ModelHyVid, ModelWan, ModelMoss, ModelSDXL, ModelSD1, ModelLumina2]
 
 def is_model_arch(model, state_dict):
     # check if model is correct
