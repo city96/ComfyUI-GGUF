@@ -914,6 +914,16 @@ class QwenImage21ConversionTests(unittest.TestCase):
                 error_msgs=[],
             )
             x = torch.randn((3, 512), dtype=torch.float32)
+            # The mixed Q8_CR layer stays INT8 (TensorWiseINT8Layout) instead of being
+            # materialized to the compute dtype, and runs through the native INT8 Linear.
+            self.assertEqual(getattr(q8_layer.weight, "_layout_cls", None), "TensorWiseINT8Layout")
+            self.assertEqual(q8_layer.weight.nbytes, 64 * 512)
+            # INT8 activations add about 1% error on top of the weight quantization.
+            q8_reference = torch.nn.functional.linear(
+                x, state_dict["transformer_blocks.0.attn.to_q.weight"].float()
+            )
+            q8_out = q8_layer(x).float()
+            self.assertLess(((q8_out - q8_reference).norm() / q8_reference.norm()).item(), 0.03)
             self.assertEqual(q4_layer._linear_dtype_for_input(x), "int8")
             qt = q4_layer._get_cached_quantized_weight(torch.device("cpu"))
             self.assertEqual(qt._params.linear_dtype, "int8")

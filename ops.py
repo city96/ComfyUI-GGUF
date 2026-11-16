@@ -165,6 +165,41 @@ def _dequantize_q8_weight_portable(weight, dtype):
     return dense.to(dtype=dtype)
 
 
+def _is_q8_weight(weight):
+    return (
+        isinstance(weight, comfy.quant_ops.QuantizedTensor)
+        and weight._layout_cls == "TensorWiseINT8Layout"
+    )
+
+
+def _mixed_q8_weight(weight, scale, quant_conf, orig_dtype):
+    """INT8 TensorWiseINT8 QuantizedTensor for a Q8_CR layer of a mixed file, or None.
+
+    Mirrors comfy.ops._load_quantized_module for "int8_tensorwise". Returns None when the
+    layout is unavailable or the layer is ConvRot-tagged without a pre-rotated weight,
+    which the layout cannot express.
+    """
+    layout = getattr(comfy.quant_ops, "TensorWiseINT8Layout", None)
+    if layout is None or not hasattr(layout, "Params"):
+        return None
+    convrot = bool(quant_conf.get("convrot", False))
+    if convrot and not quant_conf.get("weight_rotated", True):
+        return None
+    params = {"scale": scale}
+    if convrot:
+        params["convrot"] = True
+        params["convrot_groupsize"] = int(quant_conf.get("convrot_groupsize", 256))
+    try:
+        return comfy.quant_ops.QuantizedTensor(
+            weight.to(dtype=torch.int8),
+            "TensorWiseINT8Layout",
+            layout.Params(**params, orig_dtype=orig_dtype, orig_shape=tuple(weight.shape)),
+        )
+    except Exception as error:
+        logging.warning("Cannot keep mixed Q8_CR layer as INT8 (%s); materializing it.", error)
+        return None
+
+
 def _fallback_q8_linear(layer, input_tensor):
     weight, bias, offload_stream = comfy.ops.cast_bias_weight(
         layer,
@@ -848,13 +883,22 @@ def get_gguf_q4_w4a4_ops(
 
                 quant_conf = json.loads(bytes(quant_raw.tolist()).decode("utf-8"))
                 if quant_conf.get("format") == "int8_tensorwise":
-                    # Mixed custom ConvRot files may store selected layers as Q8_CR.
-                    # This operator cannot dispatch TensorWiseINT8 directly,
-                    # so materialize those layers safely instead of rejecting the
-                    # whole model. A native mixed backend can replace this fallback.
+                    # Mixed custom ConvRot files (e.g. Q4_CR_L) store selected layers as Q8_CR.
                     if weight.ndim != 2 or scale.numel() != weight.shape[0]:
                         raise ValueError(f"Invalid mixed INT8 tensors for {prefix}")
                     materialize_dtype = self._compute_dtype or dtype or torch.bfloat16
+                    native = _mixed_q8_weight(weight, scale, quant_conf, materialize_dtype)
+                    if native is not None:
+                        # Keep the layer INT8 and run it through ComfyUI's TensorWiseINT8Layout
+                        # (comfy_kitchen int8_linear), like a Q8_CR model. Materializing it
+                        # doubles its memory (INT8 -> compute dtype) and costs a CPU Hadamard
+                        # pass per layer at load time.
+                        self.weight = torch.nn.Parameter(native, requires_grad=False)
+                        self._quantized = False
+                        self._quantized_format = "int8_tensorwise"
+                        return
+                    # No usable TensorWiseINT8 layout: materialize the layer instead of
+                    # rejecting the whole model.
                     w_float = weight.to(dtype=torch.float32) * scale.to(
                         device=weight.device, dtype=torch.float32
                     ).reshape(weight.shape[0], 1)
@@ -1480,6 +1524,8 @@ def get_gguf_q4_w4a4_ops(
                     if bias is not None:
                         for f in getattr(self, "bias_function", ()):
                             bias = f(bias)
+                if self._quantized_format == "int8_tensorwise" and _is_q8_weight(self.weight):
+                    return self._forward_mixed_q8(input, bias, has_weight_functions)
                 if not self._quantized or self.weight is None:
                     # Plain Linear path
                     weight = (
@@ -1639,6 +1685,25 @@ def get_gguf_q4_w4a4_ops(
                         "CUDA ran out of memory; retrying this layer in system memory."
                     )
                     return self._cpu_forward_fallback(input, bias)
+
+            def _forward_mixed_q8(self, input, bias, has_weight_functions):
+                """Q8_CR layer inside a Q4_CR model (see _load_from_state_dict)."""
+                weight = self.weight.to(device=input.device)
+                if not has_weight_functions:
+                    try:
+                        return torch.nn.functional.linear(input, weight, bias)
+                    except Exception as error:
+                        if not getattr(self, "_gguf_mixed_q8_warned", False):
+                            logging.warning(
+                                "Native INT8 Linear failed for mixed Q8_CR layer %dx%d; "
+                                "using the portable dequantized matmul: %s",
+                                self.out_features, self.in_features, error,
+                            )
+                            self._gguf_mixed_q8_warned = True
+                dense = _dequantize_q8_weight_portable(weight, input.dtype)
+                for f in getattr(self, "weight_function", ()):
+                    dense = f(dense)
+                return torch.nn.functional.linear(input, dense, bias)
 
             def forward(self, *args, **kwargs):
                 input_tensor = args[0] if args else kwargs.get("input")
