@@ -37,6 +37,7 @@ Pre-quantized models (🍴 icon on ones added by this fork):
 - [Krea 2 (Both Turbo and Raw)](https://huggingface.co/molbal/krea2-gguf) 🍴  
 - [Ideogram 4](https://huggingface.co/molbal/ideogram-4-gguf) 🍴  
 - [MiniMax H3](https://huggingface.co/molbal/MiniMax-H3-GGUF) 🍴  
+- [MiniMax H3 Image](https://huggingface.co/molbal/MiniMax-H3-Image-GGUF) 🍴  
 - [MiniMax Music3](https://huggingface.co/molbal/Minimax-Music3-GGUF) 🍴  
 - [LTX 2.5](https://huggingface.co/molbal/LTX-2.5-GGUF) 🍴  
 - [Qwen Image 2.1](https://huggingface.co/molbal/Qwen-Image-2.1-GGUF) 🍴  
@@ -57,36 +58,9 @@ Support for quantizing T5 has also been added, these can be used using the vario
 
 ## Converting Models
 
-Fibo 2.0 Dev and Edit Turbo BF16 checkpoints are recognized using their
-repacked ComfyUI tensor layout. For example, convert either checkpoint with:
-
-```powershell
-python tools\convert.py --src "$env:USERPROFILE\Models\fibo2_dev_bf16.safetensors" --streamed --quant-type Q4_0
-python tools\convert.py --src "$env:USERPROFILE\Models\fibo2_edit_turbo_bf16.safetensors" --streamed --quant-type Q4_0
-```
-
-
-`--streamed` converts one safetensors tensor at a time, reducing peak host RAM
-for this large checkpoint. The GGUF contains only the diffusion transformer;
-load the matching Qwen3.5 text encoder and FLUX.2 VAE separately, and use the
-**Unet Loader (GGUF)**. MOSS-Image loading requires ComfyUI core MOSS support,
-introduced in upstream commit
-[`e087d8f6`](https://github.com/Comfy-Org/ComfyUI/commit/e087d8f6cb7c6cdb11b59dc7c9bf17c79f8d877d).
-Standard GGML quants are dequantized for PyTorch compute; only the repository's
-supported `Q8_CR` route uses native INT8 Linear execution.
-
-This node pack includes a GGUF converter. It has 3 possible interfaces that you can use: 
-- a python file you can call directly
-- a web interface
-- a custom node
-
 Each option is documented here: [Quantizing models](https://molbal.github.io/gguf/ecosystem/quantizing-models.html)
 
-Official Qwen3-VL 4B and 8B BF16 checkpoints convert only to a text-only
-`Q8_CR` text-encoder GGUF; its `comfy.gguf.qwen3vl.variant` field records
-which size it came from.
-
-## Supported Conversion Formats
+### Supported Conversion Formats
 
 | Format | Storage / execution       | Recommended use                                             |
 |--------|---------------------------|-------------------------------------------------------------|
