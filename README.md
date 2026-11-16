@@ -37,6 +37,7 @@ Pre-quantized models (🍴 icon on ones added by this fork):
 - [Krea 2 (Both Turbo and Raw)](https://huggingface.co/molbal/krea2-gguf) 🍴  
 - [Ideogram 4](https://huggingface.co/molbal/ideogram-4-gguf) 🍴  
 - [MiniMax H3](https://huggingface.co/molbal/MiniMax-H3-GGUF) 🍴  
+- [MiniMax H3 Image](https://huggingface.co/molbal/MiniMax-H3-GGUF) 🍴  
 - [MiniMax Music3](https://huggingface.co/molbal/Minimax-Music3-GGUF) 🍴  
 - [LTX 2.5](https://huggingface.co/molbal/LTX-2.5-GGUF) 🍴  
 - [Qwen Image 2.1](https://huggingface.co/molbal/Qwen-Image-2.1-GGUF) 🍴  
@@ -56,6 +57,29 @@ Support for quantizing T5 has also been added, these can be used using the vario
 
 
 ## Converting Models
+
+MiniMax H3 Image checkpoints have no audio stream and are detected as the
+`minimax_h3_image` architecture (ComfyUI core detects the same layout). Both
+plain BF16 exports and scaled INT8 ConvRot exports are supported; INT8 sources
+are de-rotated and expanded before requantization. Convert them with:
+
+```powershell
+python tools\convert.py --src "$env:USERPROFILE\Models\minimax_h3_image_bf16.safetensors" --streamed --quant-type Q8_0
+python tools\convert.py --src "$env:USERPROFILE\Models\minimax_h3_image_bf16.safetensors" --streamed --quant-type Q4_K_M
+```
+
+Use `--streamed` for these ~21 GB checkpoints: it converts one tensor at a time
+instead of holding the full source in memory. The 50 main transformer blocks are
+quantized normally. The `adaln_t_table` curve basis, `video_patch_proj`, the
+`final_layer` output heads and the per-block adaLN modulation projections stay
+FP32, while `condition_proj` and the `token_refiner` keep their source BF16
+precision. `comfy_attention.config` tensors are dropped because the native
+attention directives they carry do not apply after requantization.
+
+Load the result with **Unet Loader (GGUF)** or **Unet Loader (GGUF, Dynamic
+VRAM)** and use the matching Qwen3-VL-32B MiniMax H3 text encoder plus the
+MiniMax H3 Image VAE. Standard GGML quants are dequantized before PyTorch
+compute in this project; `Q8_CR` remains the native INT8 Linear path.
 
 Fibo 2.0 Dev and Edit Turbo BF16 checkpoints are recognized using their
 repacked ComfyUI tensor layout. For example, convert either checkpoint with:

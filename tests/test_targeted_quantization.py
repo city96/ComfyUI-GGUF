@@ -28,6 +28,7 @@ from tools.convert import (
     ModelLTXV,
     ModelLTXVUpsampler,
     ModelMinimaxH3,
+    ModelMinimaxH3Image,
     ModelMinimaxH3VAE,
     ModelMiniMaxMusic3DiT,
     ModelMiniMaxMusic3TextEncoder,
@@ -3821,6 +3822,212 @@ class MinimaxH3DetectionTests(unittest.TestCase):
         self.assertEqual(
             tensor_types["adaln_t_table"],
             gguf.GGMLQuantizationType.F32,
+        )
+
+
+class MinimaxH3ImageConversionTests(unittest.TestCase):
+    @staticmethod
+    def _image_state_dict():
+        # 512-wide rows keep every eligible Linear divisible by the 256-value
+        # K-quant block size, matching the real 5376-wide checkpoint.
+        return {
+            "video_patch_proj.weight": torch.ones((32, 32), dtype=torch.float16),
+            "condition_proj.weight": torch.ones((64, 512), dtype=torch.bfloat16),
+            "blocks.0.attn.qkv_proj.weight": torch.ones((96, 512), dtype=torch.float16),
+            "blocks.0.mlp.fc1.weight": torch.ones((256, 512), dtype=torch.float16),
+            "blocks.0.mlp.fc2.weight": torch.ones((512, 256), dtype=torch.float16),
+            "final_layer.video_out.weight": torch.ones((96, 512), dtype=torch.float16),
+            "token_refiner.blocks.0.attn.qkv_proj.weight": torch.ones((96, 512), dtype=torch.bfloat16),
+            "token_refiner.final_norm.weight": torch.ones((32,), dtype=torch.bfloat16),
+            "adaln_t_table": torch.ones((32, 32), dtype=torch.float32),
+        }
+
+    @staticmethod
+    def _read_converted(converted_path):
+        reader = gguf.GGUFReader(converted_path)
+        tensor_types = {tensor.name: tensor.tensor_type for tensor in reader.tensors}
+        architecture = reader.get_field("general.architecture")
+        architecture_name = str(architecture.parts[architecture.data[-1]], "utf-8")
+        del architecture
+        reader.tensors.clear()
+        reader.fields.clear()
+        reader.data._mmap.close()
+        del reader
+        return tensor_types, architecture_name
+
+    def test_detects_image_only_layout_and_rejects_av_layout(self):
+        image_arch = detect_arch(set(self._image_state_dict()))
+        self.assertIsInstance(image_arch, ModelMinimaxH3Image)
+        self.assertEqual(image_arch.arch, "minimax_h3_image")
+
+        av_keys = set(self._image_state_dict()) | {"audio_patch_proj.weight"}
+        self.assertIsInstance(detect_arch(av_keys), ModelMinimaxH3)
+        self.assertNotIsInstance(detect_arch(av_keys), ModelMinimaxH3Image)
+
+    def test_noquant_rules_are_inherited_from_h3(self):
+        model_arch = ModelMinimaxH3Image()
+        self.assertIn("adaln_t_table", model_arch.keys_hiprec)
+        self.assertIn("^condition_proj.", model_arch.keys_noquant)
+        self.assertIn("^token_refiner.", model_arch.keys_noquant)
+
+    def test_q4_k_m_plan_protects_sensitive_tensors(self):
+        plan = plan_k_quantization(self._image_state_dict(), ModelMinimaxH3Image(), "Q4_K_M")
+
+        self.assertEqual(plan["adaln_t_table"], gguf.GGMLQuantizationType.F32)
+        self.assertEqual(plan["video_patch_proj.weight"], gguf.GGMLQuantizationType.F32)
+        self.assertEqual(plan["final_layer.video_out.weight"], gguf.GGMLQuantizationType.F32)
+        # condition_proj / token_refiner stay at source precision (BF16).
+        self.assertEqual(plan["condition_proj.weight"], gguf.GGMLQuantizationType.BF16)
+        self.assertEqual(
+            plan["token_refiner.blocks.0.attn.qkv_proj.weight"],
+            gguf.GGMLQuantizationType.BF16,
+        )
+        self.assertEqual(plan["token_refiner.final_norm.weight"], gguf.GGMLQuantizationType.F32)
+        # The 50 main transformer blocks are ordinary Linear weights and must
+        # be K-quantized, not forced to F32.
+        k_types = {
+            gguf.GGMLQuantizationType.Q4_K,
+            gguf.GGMLQuantizationType.Q5_K,
+            gguf.GGMLQuantizationType.Q6_K,
+        }
+        for key in (
+            "blocks.0.attn.qkv_proj.weight",
+            "blocks.0.mlp.fc1.weight",
+            "blocks.0.mlp.fc2.weight",
+        ):
+            self.assertIn(plan[key], k_types, key)
+
+    def test_converts_image_layout_to_q8_0_and_q4_k_m(self):
+        for quant_type in ("Q8_0", "Q4_K_M"):
+            with self.subTest(quant_type=quant_type), TemporaryDirectory() as temp_dir:
+                source_path = Path(temp_dir) / "minimax_h3_image.safetensors"
+                output_path = Path(temp_dir) / f"minimax_h3_image-{quant_type}.gguf"
+                save_file(self._image_state_dict(), str(source_path))
+
+                converted_path, model_arch = convert_file(
+                    str(source_path),
+                    str(output_path),
+                    interact=False,
+                    quant_type_name=quant_type,
+                )
+                tensor_types, architecture_name = self._read_converted(converted_path)
+
+            self.assertEqual(model_arch.arch, "minimax_h3_image")
+            self.assertEqual(architecture_name, "minimax_h3_image")
+            self.assertEqual(tensor_types["adaln_t_table"], gguf.GGMLQuantizationType.F32)
+            self.assertEqual(
+                tensor_types["video_patch_proj.weight"],
+                gguf.GGMLQuantizationType.F32,
+            )
+            self.assertEqual(
+                tensor_types["token_refiner.blocks.0.attn.qkv_proj.weight"],
+                gguf.GGMLQuantizationType.BF16,
+            )
+            if quant_type == "Q8_0":
+                self.assertEqual(
+                    tensor_types["blocks.0.mlp.fc1.weight"],
+                    gguf.GGMLQuantizationType.Q8_0,
+                )
+            else:
+                self.assertIn(
+                    tensor_types["blocks.0.mlp.fc1.weight"],
+                    {
+                        gguf.GGMLQuantizationType.Q4_K,
+                        gguf.GGMLQuantizationType.Q5_K,
+                        gguf.GGMLQuantizationType.Q6_K,
+                    },
+                )
+
+    def test_requantizes_int8_convrot_source(self):
+        torch.manual_seed(0)
+        weight = torch.randn(64, 256, dtype=torch.float32)
+        qdata, scale, quant_conf, _ = quantize_int8_convrot(
+            weight, convrot_groupsize=256, device=torch.device("cpu")
+        )
+        state_dict = self._image_state_dict()
+        state_dict["blocks.0.mlp.fc1.weight"] = qdata
+        state_dict["blocks.0.mlp.fc1.weight_scale"] = scale
+        state_dict["blocks.0.mlp.fc1.comfy_quant"] = torch.tensor(
+            list(json.dumps(quant_conf).encode("utf-8")), dtype=torch.uint8
+        )
+
+        with TemporaryDirectory() as temp_dir:
+            source_path = Path(temp_dir) / "minimax_h3_image_int8.safetensors"
+            output_path = Path(temp_dir) / "minimax_h3_image-Q8_0.gguf"
+            save_file(state_dict, str(source_path))
+
+            converted_path, model_arch = convert_file(
+                str(source_path),
+                str(output_path),
+                interact=False,
+                quant_type_name="Q8_0",
+            )
+            tensor_types, architecture_name = self._read_converted(converted_path)
+
+        self.assertEqual(model_arch.arch, "minimax_h3_image")
+        self.assertEqual(architecture_name, "minimax_h3_image")
+        self.assertEqual(
+            tensor_types["blocks.0.mlp.fc1.weight"],
+            gguf.GGMLQuantizationType.Q8_0,
+        )
+        self.assertNotIn("blocks.0.mlp.fc1.weight_scale", tensor_types)
+        self.assertNotIn("blocks.0.mlp.fc1.comfy_quant", tensor_types)
+
+    def test_drops_comfy_attention_config_tensors(self):
+        # Source checkpoints can request native attention kernels (INT8
+        # attention) through `comfy_attention.config`. Those bytes are not
+        # valid after GGUF requantization and must not be written out.
+        state_dict = self._image_state_dict()
+        state_dict["blocks.0.attn.comfy_attention.config"] = torch.tensor(
+            list(json.dumps([{"attention": "comfy_kitchen_int8"}]).encode("utf-8")),
+            dtype=torch.uint8,
+        )
+
+        with TemporaryDirectory() as temp_dir:
+            source_path = Path(temp_dir) / "minimax_h3_image.safetensors"
+            output_path = Path(temp_dir) / "minimax_h3_image-Q8_0.gguf"
+            save_file(state_dict, str(source_path))
+
+            converted_path, _ = convert_file(
+                str(source_path),
+                str(output_path),
+                interact=False,
+                quant_type_name="Q8_0",
+            )
+            tensor_types, _ = self._read_converted(converted_path)
+
+        self.assertNotIn("blocks.0.attn.comfy_attention.config", tensor_types)
+
+    def test_k_quant_plan_skips_scaled_int8_source_scale_tensors(self):
+        # Real ConvRot exports store per-output-row scales shaped (N, 1).
+        # Those are consumed while restoring the INT8 weight and must not be
+        # sent through the K-quant planner.
+        state_dict = self._image_state_dict()
+        state_dict["blocks.0.mlp.fc1.weight"] = torch.ones(
+            (256, 512), dtype=torch.int8
+        )
+        state_dict["blocks.0.mlp.fc1.weight_scale"] = torch.ones(
+            (256, 1), dtype=torch.float32
+        )
+        state_dict["blocks.0.mlp.fc1.comfy_quant"] = torch.tensor(
+            list(
+                json.dumps(
+                    {"format": "int8_tensorwise", "convrot": True, "convrot_groupsize": 256}
+                ).encode("utf-8")
+            ),
+            dtype=torch.uint8,
+        )
+
+        plan = plan_k_quantization(state_dict, ModelMinimaxH3Image(), "Q4_K_M")
+
+        self.assertNotIn("blocks.0.mlp.fc1.weight_scale", plan)
+        self.assertIn(
+            plan["blocks.0.mlp.fc1.weight"],
+            {
+                gguf.GGMLQuantizationType.Q4_K,
+                gguf.GGMLQuantizationType.Q5_K,
+                gguf.GGMLQuantizationType.Q6_K,
+            },
         )
 
 

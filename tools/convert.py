@@ -451,6 +451,42 @@ class ModelMinimaxH3(ModelTemplate):
     ]
 
 
+class ModelMinimaxH3Image(ModelMinimaxH3):
+    # Image-only H3 keeps the same 50-block DiT but drops the audio stream, so
+    # ComfyUI detects it as `minimax_h3_image` (comfy/model_detection.py).
+    arch = "minimax_h3_image"
+    keys_detect = [
+        (
+            "video_patch_proj.weight",
+            "condition_proj.weight",
+            "final_layer.video_out.weight",
+            "token_refiner.final_norm.weight",
+        )
+    ]
+    # The audio/video checkpoint must stay on `minimax_h3`; its extra stream
+    # would silently load as unexpected keys here.
+    keys_banned = ["audio_patch_proj.weight"]
+    # Only the tensors that leave the ordinary Linear paths stay FP32: the
+    # timestep curve table, the latent patch projection, the final
+    # output/adaLN projections, and per-block adaLN modulation. The 50 main
+    # transformer blocks are ordinary Linear weights and are quantized.
+    keys_hiprec = [
+        "adaln_t_table",
+        "^video_patch_proj.",
+        "^final_layer.",
+        "adaln_proj",
+        "modulation",
+    ]
+    # The conditioning projection and token refiner are BF16 in the reference
+    # export, and quantizing these small paths costs quality while saving
+    # little compared with the 50 main transformer blocks.
+    keys_noquant = [
+        "^condition_proj.",
+        "^token_refiner.",
+        "norm",
+    ]
+
+
 class ModelMinimaxH3VAE(ModelTemplate):
     arch = "minimax_h3_vae"
     preserve_nd_shapes = True
@@ -629,7 +665,7 @@ class ModelFibo2(ModelTemplate):
 
 arch_list = [ModelFlux, ModelFlux3, ModelSD3, ModelAura, ModelHiDream, CosmosPredict2,
              ModelLTXV, ModelLTXVUpsampler, ModelHyVid, ModelWan, ModelSDXL, ModelSD1, ModelLumina2,
-             ModelKrea2, ModelIdeogram, ModelMinimaxH3, ModelMinimaxH3VAE,
+             ModelKrea2, ModelIdeogram, ModelMinimaxH3, ModelMinimaxH3Image, ModelMinimaxH3VAE,
              ModelMiniMaxMusic3DiT, ModelMiniMaxMusic3TextEncoder, ModelQwen3, ModelQwen3VL,
              ModelQwenImage21, ModelMOSSImage, ModelFibo2]
 
@@ -1084,6 +1120,17 @@ def plan_k_quantization(state_dict, model_arch, quant_type_name):
         if _k_matches_arch_pattern(key, model_arch.keys_ignore):
             continue
         if key.endswith(".comfy_quant") or key.endswith("_scale") and len(data.shape) == 0:
+            continue
+        # Scaled INT8 sources carry per-output-row scales shaped (N, 1). They are
+        # consumed while restoring the INT8 weight and must not be planned as
+        # quantizable tensors of their own.
+        if (
+            key.endswith("_scale")
+            and len(data.shape) == 2
+            and data.shape[-1] == 1
+            and state_dict.get(key[:-len("_scale")]) is not None
+            and state_dict[key[:-len("_scale")]].dtype == torch.int8
+        ):
             continue
         if len(data.shape) == 0 or len(data.shape) > MAX_TENSOR_DIMS:
             continue
@@ -1859,6 +1906,16 @@ def handle_tensors(
         if key_matches(key, model_arch.keys_ignore):
             if verbose:
                 tqdm.write(f"Filtering ignored key: '{key}'")
+            continue
+
+        # comfy_attention configs request native attention kernels (for example
+        # INT8 attention) that only apply to the original checkpoint's own
+        # quantized weights. After GGUF conversion the weights are dequantized
+        # or requantized, so the directive must be dropped rather than emitted
+        # as bytes the loader would try to parse as JSON.
+        if key.endswith(".comfy_attention.config"):
+            if verbose:
+                tqdm.write(f"Dropping attention config tensor: '{key}'")
             continue
 
         # comfy_quant tensors are FP8 scale factors specific to ComfyUI's custom FP8 format.

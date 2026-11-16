@@ -12,7 +12,7 @@ from .ops import GGMLTensor
 from .dequant import is_quantized, dequantize_tensor
 from .quant_ops import make_quantized
 
-IMG_ARCH_LIST = {"flux", "flux3", "sd1", "sdxl", "sd3", "aura", "hidream", "cosmos", "ltxv", "ltxv_upscaler", "hyvid", "wan", "lumina2", "qwen_image", "qwen_image21", "ideogram", "krea2", "minimax_h3", "minimax_h3_vae", "minimax_music3", "moss_image", "fibo2"}
+IMG_ARCH_LIST = {"flux", "flux3", "sd1", "sdxl", "sd3", "aura", "hidream", "cosmos", "ltxv", "ltxv_upscaler", "hyvid", "wan", "lumina2", "qwen_image", "qwen_image21", "ideogram", "krea2", "minimax_h3", "minimax_h3_image", "minimax_h3_vae", "minimax_music3", "moss_image", "fibo2"}
 TXT_ARCH_LIST = {"t5", "t5encoder", "llama", "qwen2vl", "qwen3", "qwen3vl", "qwen35", "gemma3", "gemma4", "minimax_music3"}
 VIS_TYPE_LIST = {"clip-vision", "mmproj"}
 RAW_BYTE_TENSOR_KEYS = frozenset(("tokenizer_json", "spiece_model", "tekken_model"))
