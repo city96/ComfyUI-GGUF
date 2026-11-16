@@ -5677,6 +5677,50 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class Q4CRLBackendSelectionTests(unittest.TestCase):
+    """Q4_CR_L uses comfy_kitchen's native W4A8 path on CUDA and, when its kernel supports the
+    row, on HIP; anything else must take the dense fallback (never INT4 activations)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.ops_module = ops_module_factory()
+        cls.layer = ops_factory(default_linear_dtype="int8").Linear(3072, 64, bias=False)
+
+    def _check(self, backend, hip_supported=True):
+        from types import SimpleNamespace
+        from comfy_kitchen.registry import registry
+
+        x = SimpleNamespace(device=SimpleNamespace(type="cuda"), shape=(2, 3072), dtype=torch.bfloat16)
+        qweight = SimpleNamespace(
+            _qdata=None,
+            _params=SimpleNamespace(scale=None, convrot_groupsize=256, quant_group_size=64),
+        )
+        with mock.patch.object(registry, "get_capable_backend", return_value=backend), \
+                mock.patch.object(self.ops_module, "_hip_convrot_supported", return_value=hip_supported) as support:
+            return self.layer._has_native_w4a8_cuda_backend(x, qweight), support
+
+    def test_cuda_backend_is_native(self):
+        result, support = self._check("cuda")
+        self.assertTrue(result)
+        support.assert_not_called()
+
+    def test_hip_backend_requires_kernel_support(self):
+        self.assertTrue(self._check("hip", hip_supported=True)[0])
+        self.assertFalse(self._check("hip", hip_supported=False)[0])
+
+    def test_other_backends_use_the_dense_fallback(self):
+        self.assertFalse(self._check("eager")[0])
+
+    def test_hip_support_check_passes_row_width_and_group_size(self):
+        from types import SimpleNamespace
+        from comfy_kitchen.backends import hip as kitchen_hip
+
+        x = SimpleNamespace(device="dev", shape=(5, 8192), dtype=torch.bfloat16)
+        with mock.patch.object(kitchen_hip, "_convrot_supported", return_value=False, create=True) as check:
+            self.assertFalse(self.ops_module._hip_convrot_supported(x, 256))
+        check.assert_called_once_with(8192, 256, "dev", torch.bfloat16)
+
+
 class Qwen35PreconvertedTextEncoderTests(unittest.TestCase):
     """qwen35 GGUFs that already use ComfyUI key names must not get the llama.cpp reversal."""
 

@@ -765,6 +765,20 @@ def get_gguf_q8_ops(compute_dtype=torch.bfloat16, full_precision_mm=False):
 
 # Q4_CR_W4A4 / Q4_CR_L share comfy_kitchen's ConvRot packed INT4 layout.
 # Q4_CR_L selects INT8 activations through the layout's linear_dtype parameter.
+def _hip_convrot_supported(input_tensor, convrot_groupsize):
+    """Whether comfy_kitchen's HIP ConvRot kernel handles rows of this input (else it falls back
+    to the eager path). Unknown comfy_kitchen versions are treated as unsupported."""
+    try:
+        from comfy_kitchen.backends import hip as kitchen_hip
+
+        check = getattr(kitchen_hip, "_convrot_supported", None)
+        if check is None:
+            return False
+        return bool(check(input_tensor.shape[-1], int(convrot_groupsize), input_tensor.device, input_tensor.dtype))
+    except Exception:
+        return False
+
+
 def get_gguf_q4_w4a4_ops(
     compute_dtype=torch.bfloat16,
     full_precision_mm=False,
@@ -1103,7 +1117,7 @@ def get_gguf_q4_w4a4_ops(
                     from comfy_kitchen.registry import registry
 
                     params = quantized_weight._params
-                    return registry.get_capable_backend(
+                    backend = registry.get_capable_backend(
                         "convrot_w4a4_linear",
                         {
                             "x": input_tensor,
@@ -1114,7 +1128,16 @@ def get_gguf_q4_w4a4_ops(
                             "quant_group_size": params.quant_group_size,
                             "linear_dtype": "int8",
                         },
-                    ) == "cuda"
+                    )
+                    if backend == "cuda":
+                        return True
+                    # ROCm builds report device type "cuda" but run comfy_kitchen's HIP backend.
+                    # Its registry also accepts shapes the HIP ConvRot kernel cannot run; those
+                    # go to the eager path, which quantizes activations to INT4 even with
+                    # linear_dtype="int8". Only use HIP when the kernel itself supports the row.
+                    return backend == "hip" and _hip_convrot_supported(
+                        input_tensor, params.convrot_groupsize
+                    )
                 except Exception:
                     return False
 
