@@ -594,6 +594,9 @@ QWEN35_SD_MAP = {
     "output.weight": "lm_head.weight",
 }
 
+# Embedding key of a qwen35 GGUF that already uses ComfyUI key names (no llama.cpp layout).
+QWEN35_COMFY_EMBED_KEY = "model.language_model.embed_tokens.weight"
+
 CLIP_VISION_SD_MAP = {
     "mm.": "visual.merger.mlp.",
     "v.post_ln.": "visual.merger.ln_q.",
@@ -1114,6 +1117,19 @@ def inject_qwen3vl_detection_markers(sd):
         merge_dim,
     )
 
+def dequantize_raw_lm_head(sd):
+    if "lm_head.weight" in sd and is_quantized(sd["lm_head.weight"]):
+        lm_head = sd["lm_head.weight"]
+        if getattr(lm_head, "tensor_type", None) != gguf.GGMLQuantizationType.BF16:
+            # BaseGenerate.logits() feeds lm_head straight to F.linear,
+            # bypassing the GGML ops path that dequantizes on the fly.
+            # Block-quantized GGUF data has a byte-expanded shape (e.g.
+            # Q8_0 stores scales interleaved), so raw data must never
+            # reach the matmul. BF16 storage is already full precision
+            # and keeps its logical shape, so it can stay quantized.
+            logging.warning(f"Dequantizing lm_head.weight to prevent raw-block matmul.")
+            sd["lm_head.weight"] = dequantize_tensor(lm_head, dtype=torch.float16)
+
 def gguf_clip_loader(path, dynamic=False, progress_callback=None, return_extra=False):
     sd, extra = gguf_sd_loader(
         path,
@@ -1144,6 +1160,20 @@ def gguf_clip_loader(path, dynamic=False, progress_callback=None, return_extra=F
             logging.warning(f"Dequantizing {temb_key} to prevent runtime OOM.")
             sd[temb_key] = dequantize_tensor(sd[temb_key], dtype=torch.float16)
         sd = sd_map_replace(sd, T5_SD_MAP)
+    elif arch == "qwen35" and QWEN35_COMFY_EMBED_KEY in sd:
+        # Already converted to ComfyUI key names (e.g. by a script that undoes llama.cpp's
+        # Qwen3.5 changes offline). Applying QWEN35_SD_MAP / qwen35_corrections again would
+        # subtract 1 from norms that are already raw, take log(-x) of a raw A_log and
+        # reorder V heads twice, which renders NaN (black images).
+        if is_quantized(sd[QWEN35_COMFY_EMBED_KEY]):
+            # Same reason as token_embd below: otherwise every forward dequantizes the
+            # 248k-row table to fp32 on the GPU (a ~3.8 GiB spike for the 9B model).
+            logging.warning(f"Dequantizing {QWEN35_COMFY_EMBED_KEY} to prevent runtime OOM.")
+            sd[QWEN35_COMFY_EMBED_KEY] = dequantize_tensor(sd[QWEN35_COMFY_EMBED_KEY], dtype=torch.float16)
+        dequantize_raw_lm_head(sd)
+        if not any(key.startswith(("model.visual.", "visual.")) for key in sd):
+            # No embedded vision tower: use the mmproj sidecar, as the llama.cpp branch does.
+            sd.update(gguf_mmproj_loader(path))
     elif arch in {"llama", "qwen2vl", "qwen3", "qwen3vl", "qwen35", "gemma3", "gemma4"}:
         # TODO: pass model_options["vocab_size"] to loader somehow
         temb_key = "token_embd.weight"
@@ -1201,17 +1231,7 @@ def gguf_clip_loader(path, dynamic=False, progress_callback=None, return_extra=F
             # parameters so that load_state_dict(strict=False) doesn't raise a size
             # mismatch error while still satisfying detect_te_model()'s key checks.
             inject_qwen3vl_detection_markers(sd)
-        if "lm_head.weight" in sd and is_quantized(sd["lm_head.weight"]):
-            lm_head = sd["lm_head.weight"]
-            if getattr(lm_head, "tensor_type", None) != gguf.GGMLQuantizationType.BF16:
-                # BaseGenerate.logits() feeds lm_head straight to F.linear,
-                # bypassing the GGML ops path that dequantizes on the fly.
-                # Block-quantized GGUF data has a byte-expanded shape (e.g.
-                # Q8_0 stores scales interleaved), so raw data must never
-                # reach the matmul. BF16 storage is already full precision
-                # and keeps its logical shape, so it can stay quantized.
-                logging.warning(f"Dequantizing lm_head.weight to prevent raw-block matmul.")
-                sd["lm_head.weight"] = dequantize_tensor(lm_head, dtype=torch.float16)
+        dequantize_raw_lm_head(sd)
     elif arch == "ideogram":
         # Dequantize Ideogram model for inference
         logging.info("Dequantizing Ideogram model for inference...")

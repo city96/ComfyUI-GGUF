@@ -5665,3 +5665,88 @@ class Q1CRXLQuantizationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Qwen35PreconvertedTextEncoderTests(unittest.TestCase):
+    """qwen35 GGUFs that already use ComfyUI key names must not get the llama.cpp reversal."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.loader = load_gguf_loader()
+
+    def _q8_0(self, rows, cols):
+        # Q8_0: 32 values per block stored as 34 bytes (fp16 scale + 32 int8)
+        return self.loader.GGMLTensor(
+            torch.zeros((rows, cols // 32 * 34), dtype=torch.uint8),
+            tensor_type=gguf.GGMLQuantizationType.Q8_0,
+            tensor_shape=(rows, cols),
+        )
+
+    def _load(self, state_dict):
+        with mock.patch.object(
+            self.loader,
+            "gguf_sd_loader",
+            return_value=(state_dict, {"arch_str": "qwen35", "metadata": {}}),
+        ), mock.patch.object(
+            self.loader,
+            "gguf_mmproj_loader",
+            return_value={},
+        ) as mmproj_loader:
+            loaded = self.loader.gguf_clip_loader("qwen35-te-comfy-keys.gguf")
+        return loaded, mmproj_loader
+
+    def test_comfy_key_names_are_loaded_without_llamacpp_reversal(self):
+        prefix = "model.language_model.layers.0."
+        norm = torch.full((4,), 0.25)
+        a_log = torch.tensor([-1.5, -2.0])
+        lm_head = torch.randn(8, 4)
+        loaded, mmproj_loader = self._load({
+            "model.language_model.embed_tokens.weight": torch.randn(8, 4),
+            prefix + "input_layernorm.weight": norm.clone(),
+            prefix + "linear_attn.A_log": a_log.clone(),
+            "lm_head.weight": lm_head.clone(),
+        })
+
+        # norms stay raw (no -1) and A_log is not passed through log(-x)
+        torch.testing.assert_close(loaded[prefix + "input_layernorm.weight"], norm)
+        torch.testing.assert_close(loaded[prefix + "linear_attn.A_log"], a_log)
+        torch.testing.assert_close(loaded["lm_head.weight"], lm_head)
+        # no embedded vision tower, so the mmproj sidecar is consulted like on the llama.cpp path
+        mmproj_loader.assert_called_once_with("qwen35-te-comfy-keys.gguf")
+
+    def test_embedded_vision_tower_skips_the_mmproj_sidecar(self):
+        visual = torch.randn(4, 4)
+        loaded, mmproj_loader = self._load({
+            "model.language_model.embed_tokens.weight": torch.randn(8, 4),
+            "model.visual.blocks.0.attn.proj.weight": visual.clone(),
+        })
+
+        torch.testing.assert_close(loaded["model.visual.blocks.0.attn.proj.weight"], visual)
+        mmproj_loader.assert_not_called()
+
+    def test_quantized_embedding_and_lm_head_are_dequantized(self):
+        loaded, _ = self._load({
+            "model.language_model.embed_tokens.weight": self._q8_0(8, 64),
+            "lm_head.weight": self._q8_0(8, 64),
+        })
+
+        embed = loaded["model.language_model.embed_tokens.weight"]
+        self.assertFalse(self.loader.is_quantized(embed))
+        self.assertEqual(embed.dtype, torch.float16)
+        self.assertEqual(tuple(embed.shape), (8, 64))
+        head = loaded["lm_head.weight"]
+        self.assertFalse(self.loader.is_quantized(head))
+        self.assertEqual(tuple(head.shape), (8, 64))
+
+    def test_llamacpp_layout_is_still_corrected(self):
+        loaded, _ = self._load({
+            "token_embd.weight": torch.randn(8, 4),
+            "blk.0.attn_norm.weight": torch.full((4,), 1.25),
+            "output_norm.weight": torch.ones(4),
+        })
+
+        # llama.cpp stores RMS norm weights as (w + 1)
+        torch.testing.assert_close(
+            loaded["model.language_model.layers.0.input_layernorm.weight"], torch.full((4,), 0.25)
+        )
+        torch.testing.assert_close(loaded["model.language_model.norm.weight"], torch.zeros(4))
