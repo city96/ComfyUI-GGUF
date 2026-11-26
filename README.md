@@ -46,11 +46,6 @@ Pre-quantized models (🍴 icon on ones added by this fork):
 - [Fibo 2.0](https://huggingface.co/molbal/fibo-2.0-GGUF) 🍴  
 
 
-Every GGUF loader node also exposes a trailing **`model_name`** `STRING` output
-holding the selected file name (for example `flux1-dev-Q4_K_M.gguf`). Multi-file
-CLIP loaders join the selected names with `", "`. Use it for filename builders,
-notes, or logging without retyping the model name.
-
 Support for quantizing T5 has also been added, these can be used using the various `*CLIPLoader (GGUF)` nodes which can be used inplace of the regular ones. For the CLIP model, use whatever model you were using before for CLIP. The loader can handle both types of files - `gguf` and regular `safetensors`/`bin`.  
   
 - [t5_v1.1-xxl GGUF](https://huggingface.co/city96/t5-v1_1-xxl-encoder-gguf)  
