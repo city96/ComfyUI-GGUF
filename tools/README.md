@@ -16,6 +16,11 @@ Make sure `gguf>=0.13.0` is installed for this step. Optionally, specify the out
 > 
 > After quantization, you will have to run `fix_5d_tensor.py` manually to add back the missing key that was saved by the conversion code.
 
+K-quant rows must be divisible by 256. The converter preserves architecture
+precision protections and uses its bundled deterministic GGML-compatible K
+encoder, so an installed `gguf` build only needs to provide the GGUF container
+and reader APIs.
+
 ## Quantizing using custom llama.cpp
 
 Depending on your git settings, you may need to run the following script first in order to make sure the patch file is valid. It will convert Windows (CRLF) line endings to Unix (LF) ones.

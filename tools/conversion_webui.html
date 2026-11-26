@@ -1,0 +1,893 @@
+<!doctype html>
+<!--
+THESIS: A local conversion workbench that makes each job's state and output easy to act on.
+OWN-WORLD: GGUF Diffusion's VitePress charcoal surfaces, teal brand accent, soft borders, and restrained semantic status colors.
+STORY: The operator chooses a checkpoint and quantization plan, starts a serialized conversion, and monitors or recovers it from the queue.
+FIRST VIEWPORT: Documentation navigation and help links sit above the conversion form and retained job queue; detailed output opens in a large dialog.
+FORM: Operate-mode workbench, optimized for repeatable local conversion and long-running job monitoring.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GGUF Conversion Dashboard</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #1b1b1f;
+      --bg-alt: #161618;
+      --surface: #202127;
+      --border: #3c3f44;
+      --divider: #2e2e32;
+      --text: #dfdfd6;
+      --muted: #b5b5bc;
+      --quiet: #92929a;
+      --brand: #10b0a3;
+      --brand-hover: #0d9c91;
+      --brand-deep: #10b0a3;
+      --brand-soft: rgba(16, 176, 163, .14);
+      --success: #3dd68c;
+      --warning: #f9b44e;
+      --danger: #f66f81;
+      --focus: #77e2d9;
+      --font: "Inter", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      --mono: ui-monospace, "Cascadia Code", "Menlo", "Monaco", "Consolas", "Courier New", monospace;
+      font-family: var(--font);
+      font-synthesis: none;
+      text-rendering: optimizeLegibility;
+    }
+    * { box-sizing: border-box; }
+    body { min-width: 320px; margin: 0; background: var(--bg); color: var(--text); }
+    button, input, select { font: inherit; }
+    button { cursor: pointer; }
+    a { color: var(--brand); text-underline-offset: 3px; }
+    a:hover { color: #54d5ca; }
+    ::selection { background: rgba(16, 176, 163, .34); color: #fff; }
+    :focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; }
+    input, select, button, dialog { color-scheme: dark; }
+    .topbar { position: sticky; z-index: 5; top: 0; display: flex; min-height: 64px; align-items: center; justify-content: space-between; gap: 24px; padding: 0 max(24px, calc((100vw - 1440px) / 2)); border-bottom: 1px solid var(--divider); background: rgba(27, 27, 31, .96); }
+    .brand { display: inline-flex; flex: none; align-items: center; gap: 11px; color: var(--text); font-size: .94rem; font-weight: 700; text-decoration: none; }
+    .brand img { width: 31px; height: 31px; object-fit: contain; }
+    .navlinks { display: flex; align-items: center; gap: clamp(12px, 2vw, 26px); }
+    .navlinks a { color: var(--muted); font-size: .78rem; font-weight: 600; text-decoration: none; white-space: nowrap; }
+    .navlinks a:hover { color: var(--text); }
+    .connection { display: inline-flex; align-items: center; gap: 7px; padding: 6px 10px; border: 1px solid var(--border); border-radius: 999px; color: var(--success); font-size: .9rem; font-weight: 700; white-space: nowrap; }
+    .connection::before { width: 7px; height: 7px; border-radius: 50%; background: currentColor; content: ""; }
+    .connection.offline { color: var(--warning); border-color: rgba(249, 180, 78, .45); }
+    .shell { width: min(1440px, calc(100% - 48px)); margin: 0 auto; padding: 32px 0 48px; }
+    .hero { position: relative; display: flex; min-height: 168px; align-items: center; justify-content: space-between; gap: 28px; margin-bottom: 24px; padding: 30px clamp(22px, 4vw, 52px); overflow: hidden; border: 1px solid var(--divider); border-radius: 14px; background: radial-gradient(ellipse at 84% 48%, rgba(16, 176, 163, .13), transparent 42%), var(--surface); }
+    .hero::after { position: absolute; top: -112px; right: 14%; width: 310px; height: 310px; border-radius: 50%; background: linear-gradient(135deg, rgba(16, 176, 163, .16), rgba(79, 124, 255, .12)); filter: blur(46px); pointer-events: none; content: ""; }
+    .hero-copy { position: relative; z-index: 1; max-width: 720px; }
+    h1 { margin: 0; font-size: 2.35rem; font-weight: 740; letter-spacing: -.035em; line-height: 1.12; }
+    .hero p { max-width: 66ch; margin: 10px 0 0; color: var(--muted); font-size: .91rem; line-height: 1.6; }
+    .hero-links { position: relative; z-index: 1; display: flex; flex-wrap: wrap; gap: 9px; }
+    .pill-link { padding: 9px 13px; border: 1px solid var(--border); border-radius: 999px; color: var(--text); font-size: .76rem; font-weight: 650; text-decoration: none; transition: border-color .18s ease, background .18s ease; }
+    .pill-link:hover { border-color: var(--brand); background: var(--brand-soft); color: var(--text); }
+    .workbench { display: grid; grid-template-columns: minmax(0, 1.12fr) minmax(380px, .88fr); align-items: start; gap: 20px; }
+    .panel { min-width: 0; overflow: hidden; border: 1px solid var(--divider); border-radius: 12px; background: var(--surface); }
+    .form-panel { padding: clamp(21px, 3vw, 34px); }
+    h2 { margin: 0; font-size: 1.15rem; font-weight: 680; letter-spacing: -.02em; }
+    .intro { margin: 8px 0 24px; color: var(--muted); font-size: .86rem; line-height: 1.55; }
+    .fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 17px 16px; }
+    .field { min-width: 0; }
+    .field.full { grid-column: 1 / -1; }
+    label, .legend { display: block; margin-bottom: 7px; color: var(--muted); font-size: .82rem; font-weight: 680; }
+    input:not([type="radio"]):not([type="checkbox"]), select { width: 100%; min-height: 43px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 7px; background: var(--bg-alt); color: var(--text); }
+    input::placeholder { color: #777780; }
+    input:focus, select:focus { border-color: var(--brand); outline: none; box-shadow: 0 0 0 3px var(--brand-soft); }
+    .hint { margin: 7px 0 0; color: var(--quiet); font-size: .76rem; line-height: 1.5; }
+    .help-link { margin-left: 6px; font-size: .75rem; font-weight: 500; }
+    fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
+    .mode-switch { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
+    .mode-switch label { position: relative; display: grid; min-height: 42px; place-items: center; margin: 0; padding: 9px; border: 1px solid var(--border); border-radius: 7px; color: var(--muted); font-size: .82rem; cursor: pointer; }
+    .mode-switch input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+    .mode-switch label:has(input:checked) { border-color: var(--brand); background: var(--brand-soft); color: var(--text); }
+    .mode-switch label:has(input:focus-visible) { outline: 2px solid var(--focus); outline-offset: 3px; }
+    .quant-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+    .quant-option { position: relative; display: flex; min-height: 70px; flex-direction: column; justify-content: center; gap: 5px; margin: 0; padding: 10px 11px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-alt); cursor: pointer; transition: border-color .16s ease, background .16s ease; }
+    .quant-option:hover { border-color: #696b72; }
+    .quant-option:has(input:checked) { border-color: var(--brand); background: var(--brand-soft); }
+    .quant-option:has(input:focus-visible) { outline: 2px solid var(--focus); outline-offset: 2px; }
+    .quant-option input { position: absolute; top: 10px; right: 10px; width: 15px; height: 15px; margin: 0; accent-color: var(--brand); }
+    .quant-top { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; padding-right: 22px; }
+    .quant-name { color: var(--text); font-size: .79rem; font-weight: 720; }
+    .quant-badge { display: inline-flex; align-items: center; padding: 1px 6px; border-radius: 999px; font-size: .75rem; font-weight: 650; line-height: 1.25; white-space: nowrap; }
+    .quant-badge.proprietary { border: 1px solid rgba(16, 176, 163, .45); background: rgba(16, 176, 163, .16); color: #67e5d9; }
+    .quant-badge.standard { border: 1px solid var(--border); background: rgba(255, 255, 255, .04); color: var(--muted); }
+    .quant-note { color: var(--muted); font-size: .78rem; font-weight: 450; line-height: 1.35; }
+    .mode-help { margin: 8px 0 0; }
+    .advanced { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: 23px; padding-top: 17px; border-top: 1px solid var(--divider); }
+    .advanced-toggle { padding: 4px 0; border: 0; background: transparent; color: var(--text); font-size: .83rem; font-weight: 680; }
+    .advanced-toggle::after { margin-left: 5px; color: var(--brand); content: "+"; }
+    .advanced-toggle[aria-expanded="true"]::after { content: "−"; }
+    .advanced-options { display: none; margin-top: 17px; }
+    .advanced-options.open { display: block; }
+    .checkbox { display: flex; align-items: center; gap: 9px; margin: 0; color: var(--muted); font-size: .78rem; font-weight: 500; }
+    .checkbox input { width: 16px; height: 16px; margin: 0; accent-color: var(--brand); }
+    .lora-list { display: grid; gap: 9px; }
+    .lora-row { display: grid; grid-template-columns: minmax(0, 1fr) 100px 36px; gap: 8px; }
+    .remove-lora, .secondary, .small-action { min-height: 36px; padding: 7px 11px; border: 1px solid var(--border); border-radius: 7px; background: #32363f; color: var(--text); font-size: .76rem; font-weight: 620; }
+    .remove-lora:hover, .secondary:hover, .small-action:hover { background: #414853; }
+    .add-lora { margin-top: 10px; padding: 0; border: 0; background: transparent; color: var(--brand); font-size: .8rem; font-weight: 680; }
+    .submit-row { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin-top: 24px; }
+    .error { min-height: 1.3em; margin: 0; color: var(--danger); font-size: .8rem; }
+    .start, .primary { min-height: 43px; padding: 0 17px; border: 0; border-radius: 999px; background: var(--brand-deep); color: #071b1a; font-weight: 680; transition: background .18s ease, transform .18s ease; }
+    .start:hover, .primary:hover { background: var(--brand-hover); }
+    .start:active, .primary:active { transform: translateY(1px); }
+    button:disabled { cursor: wait; opacity: .58; }
+    .queue-panel { display: grid; grid-template-rows: auto auto minmax(0, 1fr); min-height: 660px; max-height: calc(100vh - 220px); }
+    .queue-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 18px 20px; border-bottom: 1px solid var(--divider); }
+    .queue-head h2 { font-size: 1.03rem; }
+    .job-count { color: var(--muted); font-size: .74rem; font-weight: 620; font-variant-numeric: tabular-nums; }
+    .offline-note { padding: 9px 18px; border-bottom: 1px solid rgba(249, 180, 78, .3); background: rgba(249, 180, 78, .09); color: #ffd28d; font-size: .75rem; }
+    .jobs { min-height: 0; overflow: auto; scrollbar-color: #4a4b51 var(--bg-alt); scrollbar-width: thin; }
+    .empty { display: grid; min-height: 220px; place-content: center; padding: 28px; color: var(--muted); font-size: .86rem; line-height: 1.55; text-align: center; }
+    .job-entry { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; border-bottom: 1px solid var(--divider); }
+    .job { min-width: 0; }
+    .job summary { display: flex; align-items: center; gap: 9px; padding: 14px 16px; cursor: pointer; list-style: none; }
+    .job summary::-webkit-details-marker { display: none; }
+    .job-name { min-width: 0; flex: 1; overflow: hidden; font-size: .82rem; font-weight: 680; text-overflow: ellipsis; white-space: nowrap; }
+    .job-fullscreen { flex: none; min-height: 30px; padding: 5px 8px; border: 1px solid var(--border); border-radius: 7px; background: transparent; color: var(--muted); font-size: .72rem; font-weight: 620; }
+    .job-fullscreen:hover { border-color: var(--brand); color: var(--text); }
+    .status { flex: none; padding: 4px 8px; border-radius: 999px; font-size: .75rem; font-weight: 750; letter-spacing: .035em; text-transform: uppercase; }
+    .status.queued { background: rgba(249, 180, 78, .15); color: #ffd28d; }
+    .status.running, .status.cancelling { background: var(--brand-soft); color: #59d9cd; }
+    .status.completed { background: rgba(61, 214, 140, .15); color: var(--success); }
+    .status.failed, .status.cancelled { background: rgba(246, 111, 129, .15); color: #ff9aa8; }
+    .job-body { padding: 0 16px 16px; }
+    .job-meta { display: grid; gap: 5px; margin: 0 0 12px; color: var(--muted); font-size: .8rem; line-height: 1.4; overflow-wrap: anywhere; }
+    .job-meta strong { color: var(--text); font-weight: 620; }
+    pre { max-height: 220px; margin: 0; padding: 12px; overflow: auto; border: 1px solid var(--divider); border-radius: 8px; background: var(--bg-alt); color: #d4d4dc; font: .72rem/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; scrollbar-color: #4a4b51 var(--bg-alt); scrollbar-width: thin; }
+    .job-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 11px; }
+    .danger-action { border-color: rgba(246, 111, 129, .65); color: #ff9aa8; }
+    .danger-action:hover { background: rgba(246, 111, 129, .12); }
+    .retry-action { border-color: rgba(61, 214, 140, .55); color: #65e3a3; }
+    .retry-action:hover { background: rgba(61, 214, 140, .12); }
+    .hidden { display: none !important; }
+    dialog { width: min(1480px, 96vw); max-width: none; height: min(960px, 92vh); max-height: 94vh; padding: 8px; overflow: hidden; border: 1px solid var(--border); border-radius: 14px; background: var(--surface); color: var(--text); }
+    dialog::backdrop { background: rgba(5, 6, 9, .78); }
+    .modal-layout { display: grid; height: 100%; grid-template-rows: auto auto auto minmax(0, 1fr); }
+    .modal-head { display: flex; align-items: start; justify-content: space-between; gap: 18px; padding: 17px 20px; border-bottom: 1px solid var(--divider); }
+    .modal-title { min-width: 0; }
+    .modal-title h2 { overflow-wrap: anywhere; font-size: 1rem; }
+    .modal-subtitle { margin: 6px 0 0; color: var(--muted); font-size: .75rem; }
+    .modal-head-actions { display: flex; flex: none; align-items: center; gap: 9px; }
+    .command-block { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; padding: 14px 20px; border-bottom: 1px solid var(--divider); }
+    .command-block code { display: block; min-width: 0; max-height: 76px; padding: 10px 12px; overflow: auto; border: 1px solid var(--divider); border-radius: 7px; background: var(--bg-alt); color: #d4d4dc; font: .73rem/1.45 var(--mono); overflow-wrap: anywhere; user-select: text; }
+    .command-controls { display: flex; flex-direction: column; align-items: stretch; justify-content: center; gap: 8px; }
+    .modal-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-height: 56px; padding: 10px 20px; border-bottom: 1px solid var(--divider); }
+    .modal-actions .help-link { margin-left: auto; }
+    .terminal-wrap { display: grid; min-height: 0; grid-template-rows: auto minmax(0, 1fr); padding: 14px 20px 18px; }
+    .terminal-label { margin: 0 0 8px; color: var(--muted); font-size: .72rem; font-weight: 650; }
+    .terminal { max-height: none; height: 100%; min-height: 100px; padding: 16px; border-radius: 8px; background: #111114; color: #d6d6df; font-size: .76rem; line-height: 1.55; }
+    .site-footer { display: flex; justify-content: space-between; gap: 18px; padding: 21px 3px 0; color: var(--quiet); font-size: .72rem; }
+    .site-footer a { color: var(--muted); }
+    @media (max-width: 1120px) {
+      .topbar { padding-right: 18px; padding-left: 18px; }
+      .navlinks { gap: 13px; }
+      .navlinks a:nth-child(2), .navlinks a:nth-child(5) { display: none; }
+      .hero { align-items: flex-start; flex-direction: column; }
+      .workbench { grid-template-columns: minmax(0, 1fr) minmax(340px, .9fr); gap: 14px; }
+      .quant-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+    @media (max-width: 840px) {
+      .topbar { position: static; flex-wrap: wrap; padding-top: 12px; padding-bottom: 12px; }
+      .navlinks { order: 3; width: 100%; justify-content: space-between; overflow-x: auto; }
+      .navlinks a:nth-child(2), .navlinks a:nth-child(5) { display: inline; }
+      .workbench { grid-template-columns: 1fr; }
+      .queue-panel { min-height: 440px; max-height: 68vh; }
+    }
+    @media (max-width: 560px) {
+      .shell { width: calc(100% - 24px); padding-top: 16px; }
+      .topbar { gap: 12px; padding-right: 12px; padding-left: 12px; }
+      .navlinks { justify-content: flex-start; gap: 18px; }
+      .navlinks a { font-size: .72rem; }
+      .brand { font-size: .85rem; }
+      .brand img { width: 27px; height: 27px; }
+      .connection { font-size: .9rem; }
+      .hero { min-height: 0; padding: 22px 18px; }
+      h1 { font-size: 1.85rem; }
+      .hero p { font-size: .83rem; }
+      .form-panel { padding: 19px 15px; }
+      .fields { grid-template-columns: 1fr; }
+      .field.full { grid-column: auto; }
+      .quant-grid { grid-template-columns: 1fr; }
+      .advanced { align-items: flex-start; flex-direction: column; }
+      .submit-row { align-items: stretch; flex-direction: column; }
+      .start { width: 100%; }
+      .lora-row { grid-template-columns: minmax(0, 1fr) 78px 34px; }
+      .queue-panel { min-height: 400px; }
+      dialog { width: 100vw; height: 100dvh; max-height: 100dvh; border-radius: 0; }
+      .modal-head { padding: 13px; }
+      .command-block { grid-template-columns: 1fr; padding: 12px 13px; }
+      .command-controls { flex-direction: row; }
+      .modal-actions { padding: 9px 13px; }
+      .modal-actions .help-link { width: 100%; margin-left: 0; }
+      .terminal-wrap { padding: 12px 13px; }
+      .site-footer { flex-direction: column; }
+    }
+    @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; } }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="https://molbal.github.io/gguf/" target="_blank" rel="noopener noreferrer">
+      <img src="https://molbal.github.io/gguf/gguf-diffusion-icon.png" alt="" onerror="this.hidden=true">
+      <span>GGUF Diffusion</span>
+    </a>
+    <nav class="navlinks" aria-label="Documentation">
+      <a href="https://molbal.github.io/gguf/getting-started/" target="_blank" rel="noopener noreferrer">Docs</a>
+      <a href="https://molbal.github.io/gguf/ecosystem/quant-formats.html" target="_blank" rel="noopener noreferrer">Quant formats</a>
+      <a href="https://molbal.github.io/gguf/ecosystem/quantizing-models.html" target="_blank" rel="noopener noreferrer">Quantizing models</a>
+      <a href="https://molbal.github.io/gguf/models/" target="_blank" rel="noopener noreferrer">Models</a>
+      <a href="https://github.com/molbal/ComfyUI-GGUF/issues/new?template=bug_report.md" target="_blank" rel="noopener noreferrer">Report a bug</a>
+    </nav>
+    <span class="connection" id="connection-status" role="status">Connecting</span>
+  </header>
+  <main class="shell">
+    <header class="hero">
+      <div class="hero-copy">
+        <h1>GGUF conversion dashboard</h1>
+        <p>Convert local safetensors checkpoints to GGUF locally. Your jobs run one at a time, and the model files stay on this machine.</p>
+      </div>
+      <div class="hero-links" aria-label="Conversion help">
+        <a class="pill-link" href="https://molbal.github.io/gguf/ecosystem/quantizing-models.html#before-you-start" target="_blank" rel="noopener noreferrer">Before you start</a>
+      </div>
+    </header>
+    <div class="workbench">
+      <section class="panel form-panel" aria-labelledby="new-job-heading">
+        <h2 id="new-job-heading">New conversion</h2>
+        <p class="intro">Choose a new output filename. The converter will not replace an existing GGUF.</p>
+        <form id="conversion-form">
+          <div class="fields">
+            <div class="field full">
+              <label for="source">Source checkpoint</label>
+              <input id="source" name="source" required placeholder="D:\models\model.safetensors" autocomplete="off">
+              <p class="hint">Supports .safetensors, .ckpt, .pt, .pth, and .bin. <a class="help-link" href="https://molbal.github.io/gguf/ecosystem/quantizing-models.html#before-you-start" target="_blank" rel="noopener noreferrer">Input requirements</a></p>
+            </div>
+            <div class="field full">
+              <label for="destination">Destination GGUF</label>
+              <input id="destination" name="destination" required placeholder="D:\ComfyUI\models\diffusion_models\model-Q8_CR.gguf" autocomplete="off">
+              <p class="hint"><span id="destination-preview">Selecting formats adds their postfix to this filename.</span> <a class="help-link" href="https://molbal.github.io/gguf/ecosystem/quantizing-models.html#after-conversion" target="_blank" rel="noopener noreferrer">After conversion</a> · <a href="https://molbal.github.io/gguf/ecosystem/comfyui-gguf.html" target="_blank" rel="noopener noreferrer">Load in ComfyUI</a></p>
+            </div>
+            <fieldset class="field full">
+              <legend class="legend">Conversion plan</legend>
+              <div class="mode-switch">
+                <label><input type="radio" name="mode" value="quant" checked><span>Fixed quantization</span></label>
+                <label><input type="radio" name="mode" value="target"><span>Target output size</span></label>
+              </div>
+            </fieldset>
+            <fieldset class="field full" id="quant-field">
+              <legend class="legend">Quantization formats <a class="help-link" href="https://molbal.github.io/gguf/ecosystem/quantizing-models.html#choosing-a-quantization-format" target="_blank" rel="noopener noreferrer">How to choose</a></legend>
+              <div class="quant-grid">
+                <label class="quant-option"><input type="checkbox" name="quant_type" value="Q8_CR" checked><span class="quant-top"><span class="quant-name">Q8_CR</span><span class="quant-badge proprietary">Proprietary</span></span><span class="quant-note">Native INT8 path</span></label>
+                <label class="quant-option"><input type="checkbox" name="quant_type" value="Q4_CR"><span class="quant-top"><span class="quant-name">Q4_CR</span><span class="quant-badge proprietary">Proprietary</span></span><span class="quant-note">INT4 W4A4 · ConvRot</span></label>
+                <label class="quant-option"><input type="checkbox" name="quant_type" value="Q4_CR_L"><span class="quant-top"><span class="quant-name">Q4_CR_L</span><span class="quant-badge proprietary">Proprietary</span></span><span class="quant-note">INT4 W4A8 · ConvRot</span></label>
+                <label class="quant-option"><input type="checkbox" name="quant_type" value="Q1_CR_XL"><span class="quant-top"><span class="quant-name">Q1_CR_XL</span><span class="quant-badge proprietary">Experimental</span></span><span class="quant-note">1-bit W1A16 · ConvRot</span></label>
+                <label class="quant-option"><input type="checkbox" name="quant_type" value="Q8_0"><span class="quant-top"><span class="quant-name">Q8_0</span><span class="quant-badge standard">Standard</span></span><span class="quant-note">Standard 8-bit</span></label>
+                <label class="quant-option"><input type="checkbox" name="quant_type" value="Q6_K"><span class="quant-top"><span class="quant-name">Q6_K</span><span class="quant-badge standard">Standard</span></span><span class="quant-note">Uniform 6-bit K</span></label>
+                <label class="quant-option"><input type="checkbox" name="quant_type" value="Q5_K"><span class="quant-top"><span class="quant-name">Q5_K</span><span class="quant-badge standard">Standard</span></span><span class="quant-note">Uniform 5-bit K</span></label>
+                <label class="quant-option"><input type="checkbox" name="quant_type" value="Q5_K_M"><span class="quant-top"><span class="quant-name">Q5_K_M</span><span class="quant-badge standard">Standard</span></span><span class="quant-note">Mixed 5/6-bit K preset</span></label>
+                <label class="quant-option"><input type="checkbox" name="quant_type" value="Q5_K_S"><span class="quant-top"><span class="quant-name">Q5_K_S</span><span class="quant-badge standard">Standard</span></span><span class="quant-note">Small mixed K preset</span></label>
+                <label class="quant-option"><input type="checkbox" name="quant_type" value="Q4_K"><span class="quant-top"><span class="quant-name">Q4_K</span><span class="quant-badge standard">Standard</span></span><span class="quant-note">Uniform 4-bit K</span></label>
+                <label class="quant-option"><input type="checkbox" name="quant_type" value="Q4_K_M"><span class="quant-top"><span class="quant-name">Q4_K_M</span><span class="quant-badge standard">Standard</span></span><span class="quant-note">Mixed 4/5/6-bit K preset</span></label>
+                <label class="quant-option"><input type="checkbox" name="quant_type" value="Q4_K_S"><span class="quant-top"><span class="quant-name">Q4_K_S</span><span class="quant-badge standard">Standard</span></span><span class="quant-note">Small mixed K preset</span></label>
+                <label class="quant-option"><input type="checkbox" name="quant_type" value="Q5_1"><span class="quant-top"><span class="quant-name">Q5_1</span><span class="quant-badge standard">Legacy</span></span><span class="quant-note">Quality-oriented 5-bit</span></label>
+                <label class="quant-option"><input type="checkbox" name="quant_type" value="Q5_0"><span class="quant-top"><span class="quant-name">Q5_0</span><span class="quant-badge standard">Legacy</span></span><span class="quant-note">Compact 5-bit</span></label>
+                <label class="quant-option"><input type="checkbox" name="quant_type" value="Q4_1"><span class="quant-top"><span class="quant-name">Q4_1</span><span class="quant-badge standard">Legacy</span></span><span class="quant-note">Smaller 4-bit</span></label>
+                <label class="quant-option"><input type="checkbox" name="quant_type" value="Q4_0"><span class="quant-top"><span class="quant-name">Q4_0</span><span class="quant-badge standard">Legacy</span></span><span class="quant-note">Smallest 4-bit format</span></label>
+                <label class="quant-option"><input type="checkbox" name="quant_type" value="source"><span class="quant-top"><span class="quant-name">Source</span><span class="quant-badge standard">Standard</span></span><span class="quant-note">Preserve F16 or BF16</span></label>
+              </div>
+              <p class="hint"><span id="quant-selection-note">1 format selected (Q8_CR). Select multiple formats to queue a batch.</span> See <a href="https://molbal.github.io/gguf/ecosystem/quant-formats.html#standard-formats" target="_blank" rel="noopener noreferrer">standard formats</a> and <a href="https://molbal.github.io/gguf/ecosystem/quant-formats.html#custom-formats" target="_blank" rel="noopener noreferrer">custom formats</a>.</p>
+              <template id="quant-compatibility"><select><option value="Q4_CR_W4A4">Q4_CR_W4A4</option><option value="Q4_CR_L">Q4_CR_L</option><option value="Q1_CR_XL">Q1_CR_XL</option></select></template>
+            </fieldset>
+            <div class="field hidden" id="target-field">
+              <label for="target-size">Target size (MiB)</label>
+              <input id="target-size" name="target_size_mb" type="number" min="1" step="0.1" placeholder="6000">
+            </div>
+            <div class="field hidden" id="target-q8-field">
+              <label for="target-q8-type">Target-size Q8 baseline</label>
+              <select id="target-q8-type" name="target_size_q8_type">
+                <option value="Q8_CR" selected>Q8_CR - native INT8 path</option>
+                <option value="Q8_0">Q8_0 - standard GGUF Q8</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="device">Quantization device</label>
+              <select id="device" name="device">
+                <option value="auto" selected>Auto - use CUDA when available</option>
+                <option value="cuda">CUDA - require GPU</option>
+                <option value="cpu">CPU</option>
+              </select>
+            </div>
+          </div>
+          <div class="advanced">
+            <button class="advanced-toggle" id="advanced-toggle" type="button" aria-expanded="false" aria-controls="advanced-options">Fuse LoRAs</button>
+            <label class="checkbox"><input id="streamed" type="checkbox"> Stream safetensors from disk to reduce memory use</label>
+          </div>
+          <div class="advanced-options" id="advanced-options">
+            <label class="legend">LoRAs to fuse <a class="help-link" href="https://molbal.github.io/gguf/ecosystem/quantizing-models.html#merging-loras-during-conversion" target="_blank" rel="noopener noreferrer">Fusion guide</a></label>
+            <div class="lora-list" id="lora-list"></div>
+            <button class="add-lora" id="add-lora" type="button">Add LoRA</button>
+            <p class="hint">Fused LoRAs are included in the weights of the model, and inference with it will not cause VRAM or performance hit.</p>
+          </div>
+          <div class="submit-row">
+            <p class="error" id="form-error" role="alert"></p>
+            <button class="start" type="submit">Start conversion</button>
+          </div>
+        </form>
+      </section>
+      <aside class="panel queue-panel" aria-labelledby="queue-heading">
+        <div class="queue-head">
+          <h2 id="queue-heading">Conversion queue</h2>
+          <span class="job-count" id="job-count">0 jobs</span>
+        </div>
+        <div class="offline-note hidden" id="offline-note" role="status">Connection lost — showing retained history. Reconnecting…</div>
+        <div class="jobs" id="jobs" aria-live="polite"></div>
+      </aside>
+    </div>
+    <footer class="site-footer">
+      <span>GGUF quantization and open-source tools.</span>
+      <a href="https://molbal.github.io/gguf/" target="_blank" rel="noopener noreferrer">molbal.github.io/gguf</a>
+    </footer>
+  </main>
+  <dialog id="job-dialog" aria-labelledby="modal-job-title">
+    <div class="modal-layout">
+      <header class="modal-head">
+        <div class="modal-title">
+          <h2 id="modal-job-title">Conversion details</h2>
+          <p class="modal-subtitle" id="modal-job-meta"></p>
+        </div>
+        <div class="modal-head-actions">
+          <span class="status" id="modal-status"></span>
+          <button class="secondary" data-action="close-modal" type="button" aria-label="Close conversion details">Close</button>
+        </div>
+      </header>
+      <div class="command-block">
+        <code id="modal-command">Command unavailable.</code>
+        <div class="command-controls">
+          <button class="small-action" data-action="copy-command" type="button">Copy command</button>
+        </div>
+      </div>
+      <div class="modal-actions" id="modal-actions">
+        <a class="help-link" href="https://molbal.github.io/gguf/ecosystem/quantizing-models.html#command-line-conversion" target="_blank" rel="noopener noreferrer">Command-line conversion guide</a>
+      </div>
+      <section class="terminal-wrap" aria-label="Conversion output">
+        <p class="terminal-label">Conversion output · live while connected</p>
+        <pre class="terminal" id="modal-terminal" tabindex="0"></pre>
+      </section>
+    </div>
+  </dialog>
+  <template id="lora-template">
+    <div class="lora-row">
+      <input class="lora-path" placeholder="D:\models\adapter.safetensors" aria-label="LoRA path" autocomplete="off">
+      <input class="lora-strength" type="number" step="0.01" value="1" aria-label="LoRA strength">
+      <button class="remove-lora" type="button" aria-label="Remove LoRA">×</button>
+    </div>
+  </template>
+  <script>
+    const form = document.querySelector("#conversion-form");
+    const jobsElement = document.querySelector("#jobs");
+    const errorElement = document.querySelector("#form-error");
+    const connectionStatus = document.querySelector("#connection-status");
+    const offlineNote = document.querySelector("#offline-note");
+    const modeInputs = document.querySelectorAll('input[name="mode"]');
+    const quantInputs = document.querySelectorAll('input[name="quant_type"]');
+    const quantField = document.querySelector("#quant-field");
+    const targetField = document.querySelector("#target-field");
+    const targetQ8Field = document.querySelector("#target-q8-field");
+    const advancedToggle = document.querySelector("#advanced-toggle");
+    const advancedOptions = document.querySelector("#advanced-options");
+    const loraList = document.querySelector("#lora-list");
+    const jobDialog = document.querySelector("#job-dialog");
+    const HISTORY_KEY = "gguf_conversion_jobs_v1";
+    const MAX_LOG_CHARS = 40000;
+    const quantPostfixes = ["Q4_CR_W4A4", "Q1_CR_XL", "Q4_CR_L", "Q4_CR", "Q8_CR", "Q8_0", "Q6_K", "Q5_K_M", "Q5_K_S", "Q5_K", "Q4_K_M", "Q4_K_S", "Q4_K", "Q5_1", "Q5_0", "Q4_1", "Q4_0", "TARGET_SIZE", "BF16", "F16", "source"];
+    let cachedJobs = readHistory();
+    let activeModalJobId = null;
+    let destinationAuto = false;
+    let updatingDestination = false;
+    let refreshInFlight = false;
+
+    function escapeHtml(value) {
+      const element = document.createElement("span");
+      element.textContent = String(value ?? "");
+      return element.innerHTML;
+    }
+
+    function readHistory() {
+      try {
+        const stored = JSON.parse(localStorage.getItem(HISTORY_KEY) || "[]");
+        return Array.isArray(stored) ? stored.filter((job) => job && typeof job.id === "string" && typeof job.destination === "string") : [];
+      } catch {
+        return [];
+      }
+    }
+
+    function persistHistory() {
+      const jobs = cachedJobs.map((job) => {
+        const clone = { ...job };
+        const lines = Array.isArray(job.log) ? job.log : [];
+        let chars = 0;
+        const retained = [];
+        for (let index = lines.length - 1; index >= 0; index -= 1) {
+          const line = String(lines[index]);
+          if (chars + line.length > MAX_LOG_CHARS) break;
+          retained.unshift(line);
+          chars += line.length + 1;
+        }
+        clone.log = retained;
+        if (retained.length < lines.length) clone.log.unshift("[Older output trimmed in browser history]");
+        return clone;
+      });
+      try {
+        localStorage.setItem(HISTORY_KEY, JSON.stringify(jobs));
+      } catch {
+        const compact = jobs.map((job) => ({ ...job, log: (job.log || []).slice(-24) }));
+        try {
+          localStorage.setItem(HISTORY_KEY, JSON.stringify(compact));
+        } catch {
+          let retained = compact;
+          while (retained.length) {
+            retained = retained.slice(0, Math.max(1, retained.length - 10));
+            try {
+              localStorage.setItem(HISTORY_KEY, JSON.stringify(retained));
+              break;
+            } catch {
+              continue;
+            }
+          }
+        }
+      }
+    }
+
+    function mergeJobs(liveJobs) {
+      const liveIds = new Set(liveJobs.map((job) => job.id));
+      const byId = new Map(cachedJobs.map((job) => [job.id, job]));
+      const ordered = [];
+      for (const job of liveJobs) {
+        const merged = { ...byId.get(job.id), ...job };
+        byId.set(job.id, merged);
+        ordered.push(merged);
+      }
+      for (const [id, job] of byId) {
+        if (!liveIds.has(id)) {
+          if (["queued", "running", "cancelling"].includes(job.status)) {
+            job.status = "interrupted";
+            job.finished_at = new Date().toISOString();
+            job.error = "The dashboard stopped before this job reported a final result.";
+            job.log = [...(job.log || []), job.error];
+          }
+          ordered.push(job);
+        }
+      }
+      cachedJobs = ordered;
+      persistHistory();
+      return cachedJobs;
+    }
+
+    function selectedMode() {
+      return document.querySelector('input[name="mode"]:checked').value;
+    }
+
+    function selectedQuantTypes() {
+      return [...document.querySelectorAll('input[name="quant_type"]:checked')].map((input) => input.value);
+    }
+
+    function applyQuantPostfix(basePath, postfix) {
+      const slash = Math.max(basePath.lastIndexOf("\\"), basePath.lastIndexOf("/"));
+      const directory = basePath.slice(0, slash + 1);
+      let filename = basePath.slice(slash + 1).replace(/\.[^.]+$/, "");
+      const suffixPattern = new RegExp(`-(?:${quantPostfixes.join("|")})$`, "i");
+      filename = filename.replace(suffixPattern, "");
+      return `${directory}${filename}-${postfix}.gguf`;
+    }
+
+    function updateSelectionSummary() {
+      const quantNote = document.querySelector("#quant-selection-note");
+      const destPreview = document.querySelector("#destination-preview");
+      const submit = form.querySelector('button[type="submit"]');
+      const targetMode = selectedMode() === "target";
+      if (targetMode) {
+        destPreview.textContent = "Target-size mode adds -TARGET_SIZE.gguf to this filename.";
+        if (!submit.disabled) submit.textContent = "Start conversion";
+        return;
+      }
+      const chosen = selectedQuantTypes();
+      if (!chosen.length) {
+        quantNote.textContent = "Select at least one quantization format.";
+        destPreview.textContent = "Selecting formats adds their postfix to this filename.";
+        if (!submit.disabled) submit.textContent = "Start conversion";
+        return;
+      }
+      if (chosen.length === 1) {
+        quantNote.textContent = `1 format selected (${chosen[0]}). Select multiple formats to queue a batch.`;
+        destPreview.textContent = "Selecting formats adds their postfix to this filename.";
+        if (!submit.disabled) submit.textContent = "Start conversion";
+      } else {
+        quantNote.textContent = `${chosen.length} formats selected (${chosen.join(", ")}) — each queues a separate job with its postfix.`;
+        const basePath = document.querySelector("#destination").value.trim() || document.querySelector("#source").value.trim();
+        if (basePath) {
+          const files = chosen.map((format) => applyQuantPostfix(basePath, format).split(/[\\/]/).pop());
+          destPreview.textContent = `Batch outputs: ${files.join(", ")}.`;
+        } else {
+          destPreview.textContent = `Will queue ${chosen.length} postfixed .gguf files (${chosen.map((f) => `-${f}.gguf`).join(", ")}).`;
+        }
+        if (!submit.disabled) submit.textContent = `Start ${chosen.length} conversions`;
+      }
+    }
+
+    function updateDestination() {
+      const source = document.querySelector("#source").value.trim();
+      const destination = document.querySelector("#destination");
+      const chosen = selectedMode() === "target" ? "TARGET_SIZE" : selectedQuantTypes()[0];
+      const basePath = destination.value.trim() || source;
+      if (basePath && chosen) {
+        updatingDestination = true;
+        destination.value = applyQuantPostfix(basePath, chosen);
+        updatingDestination = false;
+        destinationAuto = true;
+      }
+      updateSelectionSummary();
+    }
+
+    function updateMode() {
+      const targetMode = selectedMode() === "target";
+      quantField.classList.toggle("hidden", targetMode);
+      targetField.classList.toggle("hidden", !targetMode);
+      targetQ8Field.classList.toggle("hidden", !targetMode);
+      document.querySelector("#target-size").required = targetMode;
+      updateDestination();
+    }
+
+    function addLora(path = "", strength = "1") {
+      const row = document.querySelector("#lora-template").content.cloneNode(true);
+      row.querySelector(".lora-path").value = path;
+      row.querySelector(".lora-strength").value = strength;
+      row.querySelector(".remove-lora").addEventListener("click", (event) => event.currentTarget.closest(".lora-row").remove());
+      loraList.append(row);
+    }
+
+    function jobName(job) {
+      return String(job.destination || "Conversion").split(/[\\/]/).pop();
+    }
+
+    function jobPlan(job) {
+      return job.mode === "target"
+        ? `Target ${job.target_size_mb} MiB (${job.target_size_q8_type} baseline)`
+        : job.quant_type || "Source dtype";
+    }
+
+    function canRetry(job) {
+      return ["failed", "cancelled", "interrupted"].includes(job.status);
+    }
+
+    function jobMarkup(job) {
+      const active = ["queued", "running", "cancelling"].includes(job.status);
+      const expanded = active || document.querySelector(`.job[data-job-id="${CSS.escape(job.id)}"]`)?.open;
+      const log = Array.isArray(job.log) && job.log.length ? job.log.join("\n") : "Waiting for the converter.";
+      const status = escapeHtml(job.status || "unknown");
+      return `<div class="job-entry" data-job-id="${escapeHtml(job.id)}">
+        <details class="job" data-job-id="${escapeHtml(job.id)}" ${expanded ? "open" : ""}>
+          <summary>
+            <span class="job-name" title="${escapeHtml(job.destination)}">${escapeHtml(jobName(job))}</span>
+            <span class="status ${status}">${status}</span>
+          </summary>
+          <div class="job-body">
+            <div class="job-meta">
+              <div><strong>Source:</strong> ${escapeHtml(job.source)}</div>
+              <div><strong>Plan:</strong> ${escapeHtml(jobPlan(job))} on ${escapeHtml(job.device || "auto")}</div>
+              ${job.error ? `<div><strong>Error:</strong> ${escapeHtml(job.error)}</div>` : ""}
+            </div>
+            <pre>${escapeHtml(log)}</pre>
+            <div class="job-actions">
+              ${active ? `<button class="small-action danger-action" data-action="cancel-job" data-job-id="${escapeHtml(job.id)}" type="button" ${(job.status === "cancelling" || connectionStatus.classList.contains("offline")) ? "disabled" : ""}>${job.status === "cancelling" ? "Termination requested" : "Terminate"}</button>` : ""}
+              ${canRetry(job) ? `<button class="small-action retry-action" data-action="retry-job" data-job-id="${escapeHtml(job.id)}" type="button" ${connectionStatus.classList.contains("offline") ? "disabled" : ""}>Retry</button>` : ""}
+            </div>
+          </div>
+        </details>
+        <button class="job-fullscreen" data-action="open-job" data-job-id="${escapeHtml(job.id)}" type="button">Full screen</button>
+      </div>`;
+    }
+
+    function updateConnection(online) {
+      connectionStatus.classList.toggle("offline", !online);
+      connectionStatus.textContent = online ? "Connected" : "Offline · history saved";
+      offlineNote.classList.toggle("hidden", online);
+    }
+
+    function renderModal(job) {
+      if (!job || !jobDialog.open) return;
+      document.querySelector("#modal-job-title").textContent = jobName(job);
+      document.querySelector("#modal-job-meta").textContent = `${job.destination} · ${jobPlan(job)} · ${job.device || "auto"}`;
+      const status = document.querySelector("#modal-status");
+      status.textContent = job.status || "unknown";
+      status.className = `status ${escapeHtml(job.status || "")}`;
+      const commandAvailable = Boolean(job.command_line || Array.isArray(job.command));
+      const command = job.command_line || (Array.isArray(job.command) ? job.command.map((part) => `"${String(part).replaceAll('"', '\\"')}"`).join(" ") : "Command unavailable for older history.");
+      document.querySelector("#modal-command").textContent = command;
+      const terminal = document.querySelector("#modal-terminal");
+      const wasAtBottom = terminal.scrollHeight - terminal.scrollTop - terminal.clientHeight < 48;
+      terminal.textContent = Array.isArray(job.log) && job.log.length ? job.log.join("\n") : "Waiting for the converter.";
+      if (wasAtBottom) terminal.scrollTop = terminal.scrollHeight;
+      const actions = document.querySelector("#modal-actions");
+      actions.querySelectorAll("[data-modal-action]").forEach((button) => button.remove());
+      const active = ["queued", "running", "cancelling"].includes(job.status);
+      const offline = connectionStatus.classList.contains("offline");
+      if (active) {
+        const button = document.createElement("button");
+        button.className = "small-action danger-action";
+        button.type = "button";
+        button.dataset.modalAction = "cancel-job";
+        button.dataset.jobId = job.id;
+        button.disabled = job.status === "cancelling" || offline;
+        button.textContent = job.status === "cancelling" ? "Termination requested" : "Terminate";
+        actions.prepend(button);
+      } else if (canRetry(job)) {
+        const button = document.createElement("button");
+        button.className = "small-action retry-action";
+        button.type = "button";
+        button.dataset.modalAction = "retry-job";
+        button.dataset.jobId = job.id;
+        button.disabled = offline;
+        button.textContent = "Retry";
+        actions.prepend(button);
+      }
+      document.querySelector('[data-action="copy-command"]').disabled = !commandAvailable;
+    }
+
+    function renderJobs(jobs) {
+      document.querySelector("#job-count").textContent = `${jobs.length} ${jobs.length === 1 ? "job" : "jobs"}`;
+      if (!jobs.length) {
+        if (!jobsElement.querySelector(".empty")) {
+          jobsElement.innerHTML = '<div class="empty">No conversions yet.<br>Choose a checkpoint and start a job to see its live output here.</div>';
+        }
+        return;
+      }
+      jobsElement.querySelector(".empty")?.remove();
+      const jobIds = new Set(jobs.map((job) => job.id));
+      jobsElement.querySelectorAll(".job-entry").forEach((entry) => {
+        if (!jobIds.has(entry.dataset.jobId)) entry.remove();
+      });
+      jobs.forEach((job, index) => {
+        const template = document.createElement("template");
+        template.innerHTML = jobMarkup(job);
+        const nextEntry = template.content.firstElementChild;
+        const next = nextEntry.querySelector(".job");
+        let currentEntry = jobsElement.querySelector(`.job-entry[data-job-id="${CSS.escape(job.id)}"]`);
+        if (!currentEntry) {
+          currentEntry = nextEntry;
+          const log = currentEntry.querySelector("pre");
+          log.scrollTop = log.scrollHeight;
+        } else {
+          const current = currentEntry.querySelector(".job");
+          const previousOpen = current.open;
+          const oldLog = current.querySelector("pre");
+          const nextLog = next.querySelector("pre");
+          const shouldFollow = oldLog.scrollHeight - oldLog.scrollTop - oldLog.clientHeight < 36;
+          const nextStatus = next.querySelector(".status");
+          const currentStatus = current.querySelector(".status");
+          current.querySelector(".job-name").textContent = jobName(job);
+          current.querySelector(".job-name").title = job.destination;
+          currentStatus.className = nextStatus.className;
+          currentStatus.textContent = nextStatus.textContent;
+          current.querySelector(".job-meta").innerHTML = next.querySelector(".job-meta").innerHTML;
+          if (oldLog.textContent !== nextLog.textContent) {
+            oldLog.textContent = nextLog.textContent;
+            if (shouldFollow) oldLog.scrollTop = oldLog.scrollHeight;
+          }
+          const oldActions = current.querySelector(".job-actions");
+          const nextActions = next.querySelector(".job-actions");
+          if (oldActions.innerHTML !== nextActions.innerHTML) oldActions.innerHTML = nextActions.innerHTML;
+          current.open = ["queued", "running", "cancelling"].includes(job.status) || previousOpen;
+        }
+        const position = jobsElement.children[index];
+        if (position !== currentEntry) jobsElement.insertBefore(currentEntry, position || null);
+      });
+      if (activeModalJobId) renderModal(jobs.find((job) => job.id === activeModalJobId));
+    }
+
+    async function refreshJobs() {
+      if (refreshInFlight) return;
+      refreshInFlight = true;
+      try {
+        const response = await fetch("/api/jobs", { cache: "no-store" });
+        if (!response.ok) throw new Error("Could not load conversion jobs.");
+        const data = await response.json();
+        updateConnection(true);
+        renderJobs(mergeJobs(Array.isArray(data.jobs) ? data.jobs : []));
+      } catch {
+        updateConnection(false);
+        renderJobs(cachedJobs);
+      } finally {
+        refreshInFlight = false;
+      }
+    }
+
+    async function postJob(payload) {
+      const response = await fetch("/api/jobs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "Could not add conversion.");
+      return data.job;
+    }
+
+    async function runJobAction(action, jobId) {
+      const job = cachedJobs.find((item) => item.id === jobId);
+      if (!job) return;
+      if (action === "cancel-job") {
+        const response = await fetch(`/api/jobs/${encodeURIComponent(jobId)}/cancel`, { method: "POST", body: "{}" });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || "Could not terminate conversion.");
+      } else if (action === "retry-job") {
+        const response = await fetch(`/api/jobs/${encodeURIComponent(jobId)}/retry`, { method: "POST", body: "{}" });
+        const data = await response.json();
+        if (response.ok) {
+          mergeJobs([data.job]);
+        } else if (response.status === 404 || /job was not found/i.test(data.error || "")) {
+          const payload = {
+            source: job.source,
+            destination: job.destination,
+            mode: job.mode || "quant",
+            quant_type: job.quant_type || "Q8_CR",
+            target_size_mb: job.target_size_mb,
+            target_size_q8_type: job.target_size_q8_type || "Q8_CR",
+            device: job.device || "auto",
+            streamed: Boolean(job.streamed),
+            loras: Array.isArray(job.loras) ? job.loras : [],
+          };
+          mergeJobs([await postJob(payload)]);
+        } else {
+          throw new Error(data.error || "Could not retry conversion.");
+        }
+      }
+      await refreshJobs();
+    }
+
+    async function copyCommand() {
+      const text = document.querySelector("#modal-command").textContent;
+      if (!text || text.startsWith("Command unavailable")) return;
+      try {
+        await navigator.clipboard.writeText(text);
+      } catch {
+        const temporary = document.createElement("textarea");
+        temporary.value = text;
+        temporary.style.position = "fixed";
+        temporary.style.opacity = "0";
+        document.body.append(temporary);
+        temporary.select();
+        const copied = document.execCommand("copy");
+        temporary.remove();
+        if (!copied) throw new Error("Clipboard access is unavailable.");
+      }
+      const button = document.querySelector('[data-action="copy-command"]');
+      button.textContent = "Copied";
+      window.setTimeout(() => { button.textContent = "Copy command"; }, 1400);
+    }
+
+    jobsElement.addEventListener("click", async (event) => {
+      const button = event.target.closest("button[data-action]");
+      if (!button || button.disabled) return;
+      const action = button.dataset.action;
+      if (action === "open-job") {
+        event.preventDefault();
+        activeModalJobId = button.dataset.jobId;
+        if (!jobDialog.open) jobDialog.showModal();
+        renderModal(cachedJobs.find((job) => job.id === activeModalJobId));
+        return;
+      }
+      if (action === "close-modal") {
+        jobDialog.close();
+        return;
+      }
+      if (action === "copy-command") {
+        try { await copyCommand(); } catch (error) { errorElement.textContent = error.message; }
+        return;
+      }
+      if (action === "cancel-job" || action === "retry-job") {
+        button.disabled = true;
+        try {
+          await runJobAction(action, button.dataset.jobId);
+          errorElement.textContent = "";
+        } catch (error) {
+          errorElement.textContent = error.message;
+        } finally {
+          if (button.isConnected) button.disabled = false;
+        }
+      }
+    });
+
+    jobDialog.addEventListener("click", async (event) => {
+      if (event.target === jobDialog) jobDialog.close();
+      const button = event.target.closest("button");
+      if (!button) return;
+      if (button.dataset.action === "close-modal") jobDialog.close();
+      if (button.dataset.action === "copy-command") {
+        try { await copyCommand(); } catch (error) { errorElement.textContent = error.message; }
+      }
+      if (["cancel-job", "retry-job"].includes(button.dataset.modalAction) && !button.disabled) {
+        button.disabled = true;
+        try {
+          await runJobAction(button.dataset.modalAction, button.dataset.jobId);
+          errorElement.textContent = "";
+        } catch (error) {
+          errorElement.textContent = error.message;
+        }
+      }
+    });
+    jobDialog.addEventListener("close", () => { activeModalJobId = null; });
+
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      errorElement.textContent = "";
+      const mode = selectedMode();
+      const quantTypes = selectedQuantTypes();
+      if (mode === "quant" && !quantTypes.length) {
+        errorElement.textContent = "Select at least one quantization format.";
+        return;
+      }
+      const loras = [...document.querySelectorAll(".lora-row")].map((row) => ({
+        path: row.querySelector(".lora-path").value,
+        strength: row.querySelector(".lora-strength").value,
+      }));
+      const baseDestination = document.querySelector("#destination").value.trim();
+      const basePayload = {
+        source: document.querySelector("#source").value,
+        mode,
+        target_size_mb: document.querySelector("#target-size").value,
+        target_size_q8_type: document.querySelector("#target-q8-type").value,
+        device: document.querySelector("#device").value,
+        streamed: document.querySelector("#streamed").checked,
+        loras,
+      };
+      const submit = form.querySelector('button[type="submit"]');
+      submit.disabled = true;
+      submit.textContent = mode === "quant" && quantTypes.length > 1 ? `Adding ${quantTypes.length} jobs…` : "Adding job…";
+      try {
+        if (mode === "target") {
+          await postJob({ ...basePayload, destination: baseDestination, quant_type: "Q8_CR" });
+        } else {
+          for (const quantType of quantTypes) {
+            const destination = quantTypes.length > 1 ? applyQuantPostfix(baseDestination, quantType) : baseDestination;
+            await postJob({ ...basePayload, destination, quant_type: quantType });
+          }
+        }
+        destinationAuto = false;
+        await refreshJobs();
+      } catch (error) {
+        errorElement.textContent = error.message;
+        await refreshJobs();
+      } finally {
+        submit.disabled = false;
+        updateSelectionSummary();
+      }
+    });
+
+    document.querySelector("#source").addEventListener("input", () => {
+      if (destinationAuto || !document.querySelector("#destination").value.trim()) updateDestination();
+      else updateSelectionSummary();
+    });
+    document.querySelector("#destination").addEventListener("input", () => {
+      if (!updatingDestination) {
+        destinationAuto = false;
+        updateSelectionSummary();
+      }
+    });
+    modeInputs.forEach((input) => input.addEventListener("change", updateMode));
+    quantInputs.forEach((input) => input.addEventListener("change", updateDestination));
+    advancedToggle.addEventListener("click", () => {
+      const expanded = advancedToggle.getAttribute("aria-expanded") === "true";
+      advancedToggle.setAttribute("aria-expanded", String(!expanded));
+      advancedOptions.classList.toggle("open", !expanded);
+    });
+    document.querySelector("#add-lora").addEventListener("click", () => addLora());
+    updateMode();
+    renderJobs(cachedJobs);
+    refreshJobs();
+    window.setInterval(refreshJobs, 1000);
+  </script>
+</body>
+</html>
