@@ -239,9 +239,18 @@ class GGMLOps(comfy.ops.manual_cast):
             self.weight = None
             self.bias = None
 
-        def forward_ggml_cast_weights(self, input):
+        def forward_ggml_cast_weights(self, input, input_act=None, act_weight=None, act_eps=0.0,
+                                      residual=None, residual_scale=None):
+            # Newer ComfyUI cores pass fused-linear kwargs to Linear layers
+            # (e.g. input_act="swiglu", residual=...). Apply them eagerly around
+            # the dequantized matmul; older cores never pass them.
+            if input_act is not None:
+                input = comfy.ops._eager_input_act(input, input_act, act_weight, act_eps)
             weight, bias = self.cast_bias_weight(input)
-            return torch.nn.functional.linear(input, weight, bias)
+            out = torch.nn.functional.linear(input, weight, bias)
+            if residual is not None:
+                out = comfy.ops._linear_residual(out, residual, residual_scale)
+            return out
 
     class Conv2d(GGMLLayer, comfy.ops.manual_cast.Conv2d):
         def forward_ggml_cast_weights(self, input):
