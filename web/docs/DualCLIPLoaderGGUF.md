@@ -12,6 +12,11 @@ Files can be GGUF or compatible regular text-encoder checkpoints. Select the
 same pair and model type normally used by the equivalent built-in Dual CLIP
 loader.
 
+## Outputs
+
+- **CLIP**: The combined text encoders.
+- **model_name**: Both selected file names, comma-separated, as a `STRING`.
+
 ## Usage
 
 Connect the output to the workflow's text-encoding nodes. Both encoders must

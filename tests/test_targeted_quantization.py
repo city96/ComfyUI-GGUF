@@ -1839,8 +1839,9 @@ class QwenImage21InferenceFallbackTests(unittest.TestCase):
                 )
             )
 
-            loaded, = self.nodes.UnetLoaderGGUF().load_unet("qwen-image-2.1-Q4_0.gguf")
+            loaded, model_name = self.nodes.UnetLoaderGGUF().load_unet("qwen-image-2.1-Q4_0.gguf")
 
+        self.assertEqual(model_name, "qwen-image-2.1-Q4_0.gguf")
         model_options = load_model.call_args.kwargs["model_options"]
         self.assertIs(loaded, patcher)
         self.assertEqual(model_options["dtype"], torch.float16)
@@ -5995,3 +5996,223 @@ class Qwen35PreconvertedTextEncoderTests(unittest.TestCase):
             loaded["model.language_model.layers.0.input_layernorm.weight"], torch.full((4,), 0.25)
         )
         torch.testing.assert_close(loaded["model.language_model.norm.weight"], torch.zeros(4))
+
+
+class LoaderModelNameOutputTests(unittest.TestCase):
+    """Every loader returns the selected filename as a trailing STRING output."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.nodes = nodes_factory()
+
+    LOADER_NODE_IDS = (
+        "UnetLoaderGGUF",
+        "UnetLoaderGGUFAdvanced",
+        "UnetLoaderGGUFDynamicVRAM",
+        "VAELoaderGGUF",
+        "LTXVLatentUpscaleModelLoaderGGUF",
+        "GGUFLoraImport",
+        "CLIPLoaderGGUF",
+        "CLIPLoaderGGUFDynamicVRAM",
+        "DualCLIPLoaderGGUF",
+        "DualCLIPLoaderGGUFDynamicVRAM",
+        "TripleCLIPLoaderGGUF",
+        "TripleCLIPLoaderGGUFDynamicVRAM",
+        "QuadrupleCLIPLoaderGGUF",
+        "QuadrupleCLIPLoaderGGUFDynamicVRAM",
+    )
+
+    def test_every_loader_declares_model_name_after_its_payloads(self):
+        self.assertEqual(set(self.LOADER_NODE_IDS), set(self.nodes.NODE_CLASS_MAPPINGS) - {"TargetedQuantizationGGUF"})
+        for node_id in self.LOADER_NODE_IDS:
+            with self.subTest(node=node_id):
+                node_class = self.nodes.NODE_CLASS_MAPPINGS[node_id]
+                return_types = node_class.RETURN_TYPES
+                return_names = getattr(node_class, "RETURN_NAMES", return_types)
+                self.assertEqual(len(return_names), len(return_types))
+                self.assertEqual(return_types[-1], "STRING")
+                self.assertEqual(return_names[-1], "model_name")
+
+    def _loader_name(self, *names):
+        return ", ".join(names)
+
+    def test_unet_loader_returns_selected_filename(self):
+        patcher = SimpleNamespace(model=SimpleNamespace())
+        with ExitStack() as stack:
+            self._patch_unet_loader(stack, patcher)
+            loaded, model_name = self.nodes.UnetLoaderGGUF().load_unet("flux1-dev-Q4_K_M.gguf")
+        self.assertIs(loaded, patcher)
+        self.assertEqual(model_name, "flux1-dev-Q4_K_M.gguf")
+
+    def test_dynamic_unet_loader_returns_selected_filename(self):
+        patcher = SimpleNamespace(model=SimpleNamespace())
+        with ExitStack() as stack:
+            self._patch_unet_loader(stack, patcher)
+            stack.enter_context(
+                mock.patch.object(self.nodes, "_require_dynamic_vram")
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    self.nodes, "_clone_as_dynamic_gguf_patcher", return_value=patcher
+                )
+            )
+            loaded, model_name = self.nodes.UnetLoaderGGUFDynamicVRAM().load_unet(
+                "krea2-turbo-Q8_CR.gguf"
+            )
+        self.assertIs(loaded, patcher)
+        self.assertEqual(model_name, "krea2-turbo-Q8_CR.gguf")
+
+    def test_vae_loader_returns_selected_filename(self):
+        vae = SimpleNamespace(throw_exception_if_invalid=mock.Mock())
+        with ExitStack() as stack:
+            self._patch_unet_loader(stack, SimpleNamespace())
+            stack.enter_context(
+                mock.patch.object(
+                    self.nodes,
+                    "gguf_sd_loader",
+                    return_value=({}, {"arch_str": "minimax_h3_vae", "gguf_quant_mode": "int8_convrot"}),
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    self.nodes, "get_gguf_q8_ops", return_value=lambda: SimpleNamespace()
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(self.nodes.comfy.sd, "VAE", return_value=vae)
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    self.nodes.inspect,
+                    "signature",
+                    return_value=SimpleNamespace(
+                        parameters={"sd": None, "metadata": None, "operations": None}
+                    ),
+                )
+            )
+            loaded, model_name = self.nodes.VAELoaderGGUF().load_vae("minimax-h3-vae-Q8_CR.gguf")
+        self.assertIs(loaded, vae)
+        self.assertEqual(model_name, "minimax-h3-vae-Q8_CR.gguf")
+
+    def test_clip_loader_returns_selected_filename(self):
+        clip = SimpleNamespace(patcher=SimpleNamespace())
+        with ExitStack() as stack:
+            stack.enter_context(
+                mock.patch.object(
+                    self.nodes, "_resolve_clip_path", return_value="t5-v1_1-xxl-Q8_0.gguf"
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(self.nodes.CLIPLoaderGGUF, "load_data", return_value=[{}])
+            )
+            stack.enter_context(
+                mock.patch.object(self.nodes.CLIPLoaderGGUF, "load_patcher", return_value=clip)
+            )
+            loaded, model_name = self.nodes.CLIPLoaderGGUF().load_clip("t5-v1_1-xxl-Q8_0.gguf")
+        self.assertIs(loaded, clip)
+        self.assertEqual(model_name, "t5-v1_1-xxl-Q8_0.gguf")
+
+    def test_multi_clip_loader_joins_selected_filenames(self):
+        clip = SimpleNamespace(patcher=SimpleNamespace())
+        names = ("clip-a.gguf", "clip-b.safetensors", "clip-c.gguf", "clip-d.gguf")
+        with ExitStack() as stack:
+            stack.enter_context(
+                mock.patch.object(self.nodes, "_resolve_clip_path", side_effect=lambda name: name)
+            )
+            stack.enter_context(
+                mock.patch.object(self.nodes.CLIPLoaderGGUF, "load_data", return_value=[{}] * 4)
+            )
+            stack.enter_context(
+                mock.patch.object(self.nodes.CLIPLoaderGGUF, "load_patcher", return_value=clip)
+            )
+            loaded, model_name = self.nodes.QuadrupleCLIPLoaderGGUF().load_clip(*names)
+        self.assertIs(loaded, clip)
+        self.assertEqual(model_name, self._loader_name(*names))
+
+    def test_dynamic_multi_clip_loader_joins_selected_filenames(self):
+        clip = SimpleNamespace(patcher=SimpleNamespace())
+        names = ("clip-a.gguf", "clip-b.gguf")
+        with ExitStack() as stack:
+            stack.enter_context(
+                mock.patch.object(self.nodes, "_resolve_clip_path", side_effect=lambda name: name)
+            )
+            stack.enter_context(
+                mock.patch.object(self.nodes, "_load_dynamic_gguf_clip", return_value=clip)
+            )
+            loaded, model_name = self.nodes.DualCLIPLoaderGGUFDynamicVRAM().load_clip(
+                *names, type="sd3"
+            )
+        self.assertIs(loaded, clip)
+        self.assertEqual(model_name, self._loader_name(*names))
+
+    def test_lora_import_returns_selected_filename(self):
+        model, clip, patched_model, patched_clip = (SimpleNamespace() for _ in range(4))
+        with ExitStack() as stack:
+            stack.enter_context(
+                mock.patch.object(self.nodes, "_gguf_lora_path", return_value="style.gguf")
+            )
+            stack.enter_context(
+                mock.patch.object(self.nodes, "load_gguf_lora", return_value=(None, [], {}))
+            )
+            stack.enter_context(
+                mock.patch.object(self.nodes, "_gguf_lora_key_map", return_value={})
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    self.nodes, "_remap_gguf_lora_for_comfy", return_value={}
+                )
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    self.nodes.comfy.sd,
+                    "load_lora_for_models",
+                    return_value=(patched_model, patched_clip),
+                )
+            )
+            loaded_model, loaded_clip, model_name = self.nodes.GGUFLoraImport().load_lora(
+                model, "style.gguf", 1.0, clip=clip
+            )
+        self.assertIs(loaded_model, patched_model)
+        self.assertIs(loaded_clip, patched_clip)
+        self.assertEqual(model_name, "style.gguf")
+
+    def _patch_unet_loader(self, stack, patcher):
+        progress = mock.Mock()
+        progress.callback_for.return_value = None
+        stack.enter_context(
+            mock.patch.object(self.nodes, "GGUFLoadProgress", return_value=progress)
+        )
+        stack.enter_context(
+            mock.patch.object(
+                self.nodes,
+                "gguf_sd_loader",
+                return_value=({}, {"arch_str": "flux", "metadata": {}}),
+            )
+        )
+        stack.enter_context(
+            mock.patch.object(
+                self.nodes.folder_paths, "get_full_path", side_effect=lambda _, name: name
+            )
+        )
+        stack.enter_context(
+            mock.patch.object(
+                self.nodes,
+                "_legacy_gguf_ops",
+                return_value=SimpleNamespace(
+                    Linear=SimpleNamespace(dequant_dtype=None, patch_dtype=None)
+                ),
+            )
+        )
+        stack.enter_context(
+            mock.patch.object(self.nodes, "_qwen_image21_fp16_fallback_dtype", return_value=None)
+        )
+        stack.enter_context(
+            mock.patch.object(
+                self.nodes.comfy.sd,
+                "load_diffusion_model_state_dict",
+                return_value=patcher,
+            )
+        )
+        stack.enter_context(
+            mock.patch.object(self.nodes.GGUFModelPatcher, "clone", return_value=patcher)
+        )

@@ -12,6 +12,11 @@ Loads four text encoder files and returns one combined ComfyUI `CLIP` object.
 Each input accepts a GGUF text encoder or a compatible regular checkpoint.
 The default model type is `stable_diffusion`.
 
+## Outputs
+
+- **CLIP**: The combined text encoders.
+- **model_name**: All four selected file names, comma-separated, as a `STRING`.
+
 ## Usage
 
 Use this node only for workflows whose model family requires four text

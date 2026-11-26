@@ -11,6 +11,11 @@ Loads three text encoder files and returns one combined ComfyUI `CLIP` object.
 Each input accepts a GGUF text encoder or a compatible regular checkpoint.
 This node uses the `sd3` model type by default.
 
+## Outputs
+
+- **CLIP**: The combined text encoders.
+- **model_name**: All three selected file names, comma-separated, as a `STRING`.
+
 ## Usage
 
 Use this node where an SD3-style workflow requires three text encoders. Connect

@@ -9,6 +9,11 @@ Loads one text encoder from a GGUF model file and returns a ComfyUI `CLIP`.
 - **type**: Select the model family expected by the workflow, such as
   `stable_diffusion`, `sd3`, or `krea2`.
 
+## Outputs
+
+- **CLIP**: The loaded text encoder.
+- **model_name**: The selected file name, as a `STRING`.
+
 ## Usage
 
 Connect **CLIP** to `CLIP Text Encode` nodes. The selected **type** must match

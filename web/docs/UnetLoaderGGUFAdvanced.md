@@ -20,6 +20,11 @@ For `Q8_CR` files, the loader selects ComfyUI's native INT8 ConvRot path.
 The advanced dtype controls do not convert native INT8 weights to floating
 point.
 
+## Outputs
+
+- **MODEL**: The loaded diffusion model.
+- **model_name**: The selected file name, as a `STRING`.
+
 ## Usage
 
 Connect **MODEL** to the same downstream nodes as the standard GGUF UNet loader.

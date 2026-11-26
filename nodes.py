@@ -71,6 +71,11 @@ update_folder_names_and_paths("vae_gguf", ["vae"])
 update_folder_names_and_paths("latent_upscale_models_gguf", ["latent_upscale_models"])
 
 
+def _loader_model_name(*names):
+    """Join the selected loader filenames for the STRING model_name output."""
+    return ", ".join(name for name in names if name)
+
+
 class GGUFLoadProgress:
     """Coordinate one ComfyUI progress bar across one or more model files."""
 
@@ -328,7 +333,8 @@ class UnetLoaderGGUF:
             }
         }
 
-    RETURN_TYPES = ("MODEL",)
+    RETURN_TYPES = ("MODEL", "STRING")
+    RETURN_NAMES = ("MODEL", "model_name")
     FUNCTION = "load_unet"
     CATEGORY = "bootleg"
     TITLE = "Unet Loader (GGUF, Legacy node)"
@@ -375,7 +381,7 @@ class UnetLoaderGGUF:
         model = GGUFModelPatcher.clone(model)
         _apply_qwen_image21_fp16_fallback(model, fallback_dtype)
         model.patch_on_device = patch_on_device
-        return (model,)
+        return (model, unet_name)
 
 
 class VAELoaderGGUF:
@@ -387,7 +393,8 @@ class VAELoaderGGUF:
             }
         }
 
-    RETURN_TYPES = ("VAE",)
+    RETURN_TYPES = ("VAE", "STRING")
+    RETURN_NAMES = ("VAE", "model_name")
     FUNCTION = "load_vae"
     CATEGORY = "bootleg"
     TITLE = "VAE Loader (GGUF, Legacy node)"
@@ -436,7 +443,7 @@ class VAELoaderGGUF:
             finally:
                 minimax_vae.ops = original_operations
         vae.throw_exception_if_invalid()
-        return (vae,)
+        return (vae, vae_name)
 
 
 class LTXVLatentUpscaleModelLoaderGGUF:
@@ -450,7 +457,8 @@ class LTXVLatentUpscaleModelLoaderGGUF:
             }
         }
 
-    RETURN_TYPES = ("LATENT_UPSCALE_MODEL",)
+    RETURN_TYPES = ("LATENT_UPSCALE_MODEL", "STRING")
+    RETURN_NAMES = ("LATENT_UPSCALE_MODEL", "model_name")
     FUNCTION = "load_model"
     CATEGORY = "bootleg"
     TITLE = "LTXV Latent Upscale Model Loader (GGUF)"
@@ -491,7 +499,7 @@ class LTXVLatentUpscaleModelLoaderGGUF:
             offload_device=comfy.model_management.unet_offload_device(),
         )
         model.load_state_dict(state_dict, assign=model_patcher.is_dynamic())
-        return (model_patcher,)
+        return (model_patcher, model_name)
 
 
 class TargetedQuantizationGGUF:
@@ -725,7 +733,8 @@ class GGUFLoraImport:
             },
         }
 
-    RETURN_TYPES = ("MODEL", "CLIP")
+    RETURN_TYPES = ("MODEL", "CLIP", "STRING")
+    RETURN_NAMES = ("MODEL", "CLIP", "model_name")
     FUNCTION = "load_lora"
     CATEGORY = "bootleg/LoRA"
     TITLE = "Load LoRA (GGUF)"
@@ -735,7 +744,7 @@ class GGUFLoraImport:
         _, targets, metadata = load_gguf_lora(path)
         key_map = _gguf_lora_key_map(model, clip)
         lora = _remap_gguf_lora_for_comfy(targets, key_map)
-        return comfy.sd.load_lora_for_models(
+        patched_model, patched_clip = comfy.sd.load_lora_for_models(
             model,
             clip,
             lora,
@@ -743,6 +752,7 @@ class GGUFLoraImport:
             strength_clip,
             lora_metadata={"gguf_lora": metadata},
         )
+        return (patched_model, patched_clip, lora_name)
 
 
 def _parse_lora_paths(lora_paths):
@@ -1105,7 +1115,10 @@ class UnetLoaderGGUFDynamicVRAM(UnetLoaderGGUF):
 
     def load_unet(self, unet_name, **kwargs):
         unet_path = folder_paths.get_full_path("unet", unet_name)
-        return (_load_dynamic_gguf_unet(unet_path, progress=GGUFLoadProgress([unet_path])),)
+        return (
+            _load_dynamic_gguf_unet(unet_path, progress=GGUFLoadProgress([unet_path])),
+            unet_name,
+        )
 
 class UnetLoaderGGUFAdvanced(UnetLoaderGGUF):
     @classmethod
@@ -1143,7 +1156,8 @@ class CLIPLoaderGGUF:
             }
         }
 
-    RETURN_TYPES = ("CLIP",)
+    RETURN_TYPES = ("CLIP", "STRING")
+    RETURN_NAMES = ("CLIP", "model_name")
     FUNCTION = "load_clip"
     CATEGORY = "bootleg"
     TITLE = "CLIPLoader (GGUF, Legacy node)"
@@ -1198,7 +1212,8 @@ class CLIPLoaderGGUF:
     def load_clip(self, clip_name, type="stable_diffusion"):
         clip_path = _resolve_clip_path(clip_name)
         clip_type = getattr(comfy.sd.CLIPType, type.upper(), comfy.sd.CLIPType.STABLE_DIFFUSION)
-        return (self.load_patcher([clip_path], clip_type, self.load_data([clip_path])),)
+        clip = self.load_patcher([clip_path], clip_type, self.load_data([clip_path]))
+        return (clip, clip_name)
 
 
 @contextmanager
@@ -1420,14 +1435,13 @@ class CLIPLoaderGGUFDynamicVRAM(CLIPLoaderGGUF):
     def load_clip(self, clip_name, type="stable_diffusion"):
         clip_path = _resolve_clip_path(clip_name)
         clip_type = getattr(comfy.sd.CLIPType, type.upper(), comfy.sd.CLIPType.STABLE_DIFFUSION)
-        return (
-            _load_dynamic_gguf_clip(
-                [clip_path],
-                clip_type,
-                progress=GGUFLoadProgress([clip_path]),
-                enable_q8_native=True,
-            ),
+        clip = _load_dynamic_gguf_clip(
+            [clip_path],
+            clip_type,
+            progress=GGUFLoadProgress([clip_path]),
+            enable_q8_native=True,
         )
+        return (clip, clip_name)
 
 class DualCLIPLoaderGGUF(CLIPLoaderGGUF):
     @classmethod
@@ -1449,7 +1463,8 @@ class DualCLIPLoaderGGUF(CLIPLoaderGGUF):
         clip_path2 = _resolve_clip_path(clip_name2)
         clip_paths = (clip_path1, clip_path2)
         clip_type = getattr(comfy.sd.CLIPType, type.upper(), comfy.sd.CLIPType.STABLE_DIFFUSION)
-        return (self.load_patcher(clip_paths, clip_type, self.load_data(clip_paths)),)
+        clip = self.load_patcher(clip_paths, clip_type, self.load_data(clip_paths))
+        return (clip, _loader_model_name(clip_name1, clip_name2))
 
 
 class DualCLIPLoaderGGUFDynamicVRAM(DualCLIPLoaderGGUF):
@@ -1461,7 +1476,8 @@ class DualCLIPLoaderGGUFDynamicVRAM(DualCLIPLoaderGGUF):
             _resolve_clip_path(clip_name2),
         )
         clip_type = getattr(comfy.sd.CLIPType, type.upper(), comfy.sd.CLIPType.STABLE_DIFFUSION)
-        return (_load_dynamic_gguf_clip(clip_paths, clip_type),)
+        clip = _load_dynamic_gguf_clip(clip_paths, clip_type)
+        return (clip, _loader_model_name(clip_name1, clip_name2))
 
 class TripleCLIPLoaderGGUF(CLIPLoaderGGUF):
     @classmethod
@@ -1483,7 +1499,8 @@ class TripleCLIPLoaderGGUF(CLIPLoaderGGUF):
         clip_path3 = _resolve_clip_path(clip_name3)
         clip_paths = (clip_path1, clip_path2, clip_path3)
         clip_type = getattr(comfy.sd.CLIPType, type.upper(), comfy.sd.CLIPType.STABLE_DIFFUSION)
-        return (self.load_patcher(clip_paths, clip_type, self.load_data(clip_paths)),)
+        clip = self.load_patcher(clip_paths, clip_type, self.load_data(clip_paths))
+        return (clip, _loader_model_name(clip_name1, clip_name2, clip_name3))
 
 
 class TripleCLIPLoaderGGUFDynamicVRAM(TripleCLIPLoaderGGUF):
@@ -1496,7 +1513,8 @@ class TripleCLIPLoaderGGUFDynamicVRAM(TripleCLIPLoaderGGUF):
             _resolve_clip_path(clip_name3),
         )
         clip_type = getattr(comfy.sd.CLIPType, type.upper(), comfy.sd.CLIPType.STABLE_DIFFUSION)
-        return (_load_dynamic_gguf_clip(clip_paths, clip_type),)
+        clip = _load_dynamic_gguf_clip(clip_paths, clip_type)
+        return (clip, _loader_model_name(clip_name1, clip_name2, clip_name3))
 
 class QuadrupleCLIPLoaderGGUF(CLIPLoaderGGUF):
     @classmethod
@@ -1520,7 +1538,11 @@ class QuadrupleCLIPLoaderGGUF(CLIPLoaderGGUF):
         clip_path4 = _resolve_clip_path(clip_name4)
         clip_paths = (clip_path1, clip_path2, clip_path3, clip_path4)
         clip_type = getattr(comfy.sd.CLIPType, type.upper(), comfy.sd.CLIPType.STABLE_DIFFUSION)
-        return (self.load_patcher(clip_paths, clip_type, self.load_data(clip_paths)),)
+        clip = self.load_patcher(clip_paths, clip_type, self.load_data(clip_paths))
+        return (
+            clip,
+            _loader_model_name(clip_name1, clip_name2, clip_name3, clip_name4),
+        )
 
 
 class QuadrupleCLIPLoaderGGUFDynamicVRAM(QuadrupleCLIPLoaderGGUF):
@@ -1534,7 +1556,11 @@ class QuadrupleCLIPLoaderGGUFDynamicVRAM(QuadrupleCLIPLoaderGGUF):
             _resolve_clip_path(clip_name4),
         )
         clip_type = getattr(comfy.sd.CLIPType, type.upper(), comfy.sd.CLIPType.STABLE_DIFFUSION)
-        return (_load_dynamic_gguf_clip(clip_paths, clip_type),)
+        clip = _load_dynamic_gguf_clip(clip_paths, clip_type)
+        return (
+            clip,
+            _loader_model_name(clip_name1, clip_name2, clip_name3, clip_name4),
+        )
 
 NODE_CLASS_MAPPINGS = {
     "TargetedQuantizationGGUF": TargetedQuantizationGGUF,
