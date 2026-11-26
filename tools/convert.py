@@ -363,6 +363,15 @@ class ModelLumina2(ModelTemplate):
     keys_detect = [
         ("cap_embedder.1.weight", "context_refiner.0.attention.qkv.weight")
     ]
+    # NextDiT pad tokens are 2-D singleton parameters of shape (1, K), not
+    # Linear weights. Packing them as INT4 halves their stored last dimension
+    # (e.g. (1, 1920)), and Q8_CR adds unexpected *_scale tensors, both of
+    # which break ComfyUI's NextDiT state_dict load. The final patch linear
+    # stays in F32 to avoid per-patch quantization grid artifacts.
+    keys_hiprec = ["pad_token", "^final_layer.linear."]
+    # Caption embedder and AdaLN modulations are sensitive to 4-bit error;
+    # keep them in native INT8 ConvRot for clean prompt adherence.
+    keys_q8_cr = ["^cap_embedder.", "adaLN_modulation"]
 
 class ModelIdeogram(ModelTemplate):
     arch = "ideogram"

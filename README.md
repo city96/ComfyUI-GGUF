@@ -44,6 +44,7 @@ Pre-quantized models (🍴 icon on ones added by this fork):
 - [Flux3 Klein](https://huggingface.co/molbal/Flux-3-Klein-GGUF) 🍴  
 - [Moss Image](https://huggingface.co/molbal/MOSS-Image-GGUF) 🍴  
 - [Fibo 2.0](https://huggingface.co/molbal/fibo-2.0-GGUF) 🍴  
+- Z-Image / Z-Image Turbo (NextDiT, arch `lumina2`) GGUF conversion; pad tokens and the final patch linear stay F32 and the caption embedder/AdaLN use native INT8 for `Q8_CR`/`Q4_CR`/`Q4_CR_L`.
 
 
 Support for quantizing T5 has also been added, these can be used using the various `*CLIPLoader (GGUF)` nodes which can be used inplace of the regular ones. For the CLIP model, use whatever model you were using before for CLIP. The loader can handle both types of files - `gguf` and regular `safetensors`/`bin`.  

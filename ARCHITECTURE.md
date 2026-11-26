@@ -134,6 +134,27 @@ The fallback logic operates as follows:
 
 `Q4_0` acts as the hard floor for core quantization. If a specified target falls below this theoretical minimum, the converter throws an error reporting the minimum achievable size. 
 
+## Architecture Precision Rules
+
+Each `Model*` template in `tools/convert.py` can declare:
+
+* `keys_hiprec` -- tensors forced to F32 for every quant type.
+* `keys_q8_cr` -- Linears quantized in native INT8 ConvRot in `Q8_CR` and
+  `Q4_CR*` conversions.
+* `keys_q8_cr_l` -- additional `Q8_CR` Linears used only by `Q4_CR_L`.
+* `keys_noquant` / `keys_k_noquant` -- tensors that keep their source
+  FP16/BF16 precision for a given format family.
+
+`keys_hiprec` is applied before the ConvRot INT4/INT8 packing branches, so it
+also protects non-Linear 2-D parameters whose K dimension happens to be
+ConvRot-divisible. `Z-Image` / `Z-Image Turbo` (NextDiT, arch `lumina2`) needs
+this: `x_pad_token` and `cap_pad_token` are singleton parameters shaped
+`(1, 3840)`, not Linear weights. Without protection, `Q4_CR` / `Q4_CR_L` pack
+them to `(1, 1920)`, and `Q8_CR` writes unexpected `_pad_token_scale`
+companions, both of which fail ComfyUI's `NextDiT` load. The template keeps
+those pad tokens and `final_layer.linear` in F32, and promotes
+`cap_embedder` / `adaLN_modulation` to native INT8.
+
 ## LoRAs and Fused GGUF Exports
 
 **Load LoRA (GGUF)** integrates standard GGUF adapters directly into ComfyUI's patch mechanism. It natively parses `general.type=adapter` and `adapter.type=lora` alongside `.lora_a`/`.lora_b` tensors in F32, F16, BF16, or Q8_0.

@@ -34,6 +34,7 @@ from tools.convert import (
     ModelMiniMaxMusic3TextEncoder,
     ModelFlux3,
     ModelFibo2,
+    ModelLumina2,
     ModelMOSSImage,
     ModelQwen3,
     ModelQwen3VL,
@@ -791,6 +792,196 @@ class Flux3ConversionTests(unittest.TestCase):
             self.assertLess(rel_err.item(), 0.02)
             del sd, sd_cr, sd_crl, lin
             gc.collect()
+
+
+class Lumina2ConversionTests(unittest.TestCase):
+    """Z-Image / Z-Image Turbo NextDiT (ModelLumina2) quantization rules."""
+
+    @staticmethod
+    def _source_state_dict():
+        torch.manual_seed(43)
+        dim = 3840
+        return {
+            "cap_embedder.0.weight": torch.randn((256,), dtype=torch.bfloat16),
+            "cap_embedder.1.weight": torch.randn((dim, 256), dtype=torch.bfloat16),
+            "cap_embedder.1.bias": torch.randn((dim,), dtype=torch.bfloat16),
+            "context_refiner.0.attention.qkv.weight": torch.randn((3 * 256, 256), dtype=torch.bfloat16),
+            "x_pad_token": torch.randn((1, dim), dtype=torch.bfloat16),
+            "cap_pad_token": torch.randn((1, dim), dtype=torch.bfloat16),
+            "layers.0.adaLN_modulation.1.weight": torch.randn((dim, 256), dtype=torch.bfloat16),
+            "layers.0.attention.qkv.weight": torch.randn((3 * 256, 256), dtype=torch.bfloat16),
+            "layers.0.feed_forward.w13.weight": torch.randn((2 * 256, 256), dtype=torch.bfloat16),
+            "final_layer.linear.weight": torch.randn((64, dim), dtype=torch.bfloat16),
+            "final_layer.adaLN_modulation.1.weight": torch.randn((dim, 256), dtype=torch.bfloat16),
+        }
+
+    @staticmethod
+    def _read_tensor_types(path):
+        reader = gguf.GGUFReader(str(path))
+        tensor_types = {tensor.name: tensor.tensor_type for tensor in reader.tensors}
+        tensor_shapes = {
+            tensor.name: tuple(int(v) for v in reversed(tensor.shape))
+            for tensor in reader.tensors
+        }
+        architecture = reader.get_field("general.architecture").contents()
+        reader.tensors.clear()
+        reader.fields.clear()
+        reader.data._mmap.close()
+        del reader
+        return tensor_types, tensor_shapes, architecture
+
+    def test_detects_lumina2_arch(self):
+        model_arch = detect_arch(self._source_state_dict())
+
+        self.assertIsInstance(model_arch, ModelLumina2)
+        self.assertEqual(model_arch.arch, "lumina2")
+        self.assertIn("pad_token", model_arch.keys_hiprec)
+        self.assertIn("^cap_embedder.", model_arch.keys_q8_cr)
+
+    def test_q8_cr_keeps_pad_tokens_f32_without_scale_tensors(self):
+        with TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / "z-image-Q8_CR.gguf"
+            converted_path, model_arch = convert_state_dict(
+                self._source_state_dict(),
+                str(output_path),
+                quant_type_name="Q8_CR",
+                quantization_device="cpu",
+            )
+
+            tensor_types, tensor_shapes, architecture = self._read_tensor_types(converted_path)
+
+            loader = load_gguf_loader()
+            for dynamic in (False, True):
+                loaded, extra = loader.gguf_sd_loader(
+                    converted_path,
+                    handle_prefix=None,
+                    dynamic=dynamic,
+                )
+                self.assertEqual(extra["arch_str"], "lumina2")
+                for pad_key in ("x_pad_token", "cap_pad_token"):
+                    self.assertIn(pad_key, loaded)
+                    self.assertEqual(tuple(loaded[pad_key].shape), (1, 3840))
+                del loaded
+                gc.collect()
+
+        self.assertIsInstance(model_arch, ModelLumina2)
+        self.assertEqual(architecture, "lumina2")
+        for pad_key in ("x_pad_token", "cap_pad_token"):
+            self.assertEqual(tensor_types[pad_key], gguf.GGMLQuantizationType.F32)
+            self.assertEqual(tensor_shapes[pad_key], (1, 3840))
+            self.assertNotIn(f"{pad_key}_scale", tensor_types)
+            self.assertNotIn(f"comfy.gguf.quant.{pad_key}", tensor_shapes)
+        # Final patch linear stays F32; caption embedder and AdaLN become INT8.
+        self.assertEqual(
+            tensor_types["final_layer.linear.weight"],
+            gguf.GGMLQuantizationType.F32,
+        )
+        for key in (
+            "cap_embedder.1.weight",
+            "layers.0.adaLN_modulation.1.weight",
+            "final_layer.adaLN_modulation.1.weight",
+        ):
+            self.assertEqual(tensor_types[key], gguf.GGMLQuantizationType.I8)
+            self.assertEqual(tensor_types[f"{key}_scale"], gguf.GGMLQuantizationType.F32)
+        self.assertEqual(
+            tensor_types["layers.0.attention.qkv.weight"],
+            gguf.GGMLQuantizationType.I8,
+        )
+
+    def test_q4_cr_and_q4_cr_l_keep_pad_tokens_unpacked(self):
+        with TemporaryDirectory() as temp_dir:
+            for quant_type, expected_backing in (("Q4_CR", "w4a4"), ("Q4_CR_L", "w4a8")):
+                with self.subTest(quant_type=quant_type):
+                    output_path = Path(temp_dir) / f"z-image-{quant_type}.gguf"
+                    converted_path, _ = convert_state_dict(
+                        self._source_state_dict(),
+                        str(output_path),
+                        quant_type_name=quant_type,
+                        quantization_device="cpu",
+                    )
+
+                    tensor_types, tensor_shapes, _ = self._read_tensor_types(converted_path)
+
+                    self.assertEqual(tensor_types["x_pad_token"], gguf.GGMLQuantizationType.F32)
+                    self.assertEqual(tensor_types["cap_pad_token"], gguf.GGMLQuantizationType.F32)
+                    self.assertEqual(tensor_shapes["x_pad_token"], (1, 3840))
+                    self.assertEqual(tensor_shapes["cap_pad_token"], (1, 3840))
+                    self.assertNotIn("x_pad_token_scale", tensor_types)
+                    self.assertNotIn("cap_pad_token_scale", tensor_types)
+                    self.assertEqual(
+                        tensor_types["final_layer.linear.weight"],
+                        gguf.GGMLQuantizationType.F32,
+                    )
+
+                    reader = gguf.GGUFReader(str(converted_path))
+                    caption_field = reader.get_field("comfy.gguf.quant.cap_embedder.1.weight")
+                    caption_conf = json.loads(
+                        str(caption_field.parts[caption_field.data[-1]], "utf-8")
+                    )
+                    adaln_field = reader.get_field(
+                        "comfy.gguf.quant.layers.0.adaLN_modulation.1.weight"
+                    )
+                    adaln_conf = json.loads(
+                        str(adaln_field.parts[adaln_field.data[-1]], "utf-8")
+                    )
+                    mlp_field = reader.get_field(
+                        "comfy.gguf.quant.layers.0.feed_forward.w13.weight"
+                    )
+                    mlp_conf = json.loads(str(mlp_field.parts[mlp_field.data[-1]], "utf-8"))
+                    del caption_field, adaln_field, mlp_field
+                    reader.tensors.clear()
+                    reader.fields.clear()
+                    reader.data._mmap.close()
+                    del reader
+
+                    self.assertEqual(caption_conf["format"], "int8_tensorwise")
+                    self.assertEqual(adaln_conf["format"], "int8_tensorwise")
+                    self.assertEqual(mlp_conf["format"], "int4_cr")
+                    self.assertEqual(mlp_conf["backing"], expected_backing)
+
+                    loader = load_gguf_loader()
+                    for dynamic in (False, True):
+                        loaded, extra = loader.gguf_sd_loader(
+                            converted_path,
+                            handle_prefix=None,
+                            dynamic=dynamic,
+                        )
+                        self.assertEqual(
+                            extra["gguf_quant_mode"],
+                            "int4_cr_w4a8" if quant_type == "Q4_CR_L" else "int4_cr_w4a4",
+                        )
+                        self.assertEqual(
+                            tuple(loaded["x_pad_token"].shape),
+                            (1, 3840),
+                        )
+                        self.assertEqual(
+                            tuple(loaded["cap_pad_token"].shape),
+                            (1, 3840),
+                        )
+                        del loaded
+                        gc.collect()
+
+    def test_k_quant_selection_preserves_pad_tokens(self):
+        state_dict = self._source_state_dict()
+        model_arch = detect_arch(state_dict)
+
+        for quant_type in ("Q4_K_M", "Q6_K"):
+            plan = plan_k_quantization(state_dict, model_arch, quant_type)
+            with self.subTest(quant_type=quant_type):
+                self.assertEqual(plan["x_pad_token"], gguf.GGMLQuantizationType.F32)
+                self.assertEqual(plan["cap_pad_token"], gguf.GGMLQuantizationType.F32)
+                self.assertEqual(
+                    plan["final_layer.linear.weight"],
+                    gguf.GGMLQuantizationType.F32,
+                )
+                self.assertIn(
+                    plan["layers.0.attention.qkv.weight"],
+                    {
+                        gguf.GGMLQuantizationType.Q4_K,
+                        gguf.GGMLQuantizationType.Q5_K,
+                        gguf.GGMLQuantizationType.Q6_K,
+                    },
+                )
 
 
 class QwenImage21ConversionTests(unittest.TestCase):
